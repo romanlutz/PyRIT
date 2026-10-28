@@ -1,4 +1,12 @@
 import { makeStyles, tokens } from '@fluentui/react-components'
+import {
+  TOUCH_INPUT_QUERY,
+  MINIMUM_TOUCH_TARGET_SIZE,
+  mobileTouchTarget,
+  mobileTouchTargetHeight,
+} from '../../styles/touchTargets'
+
+import { WORKSPACE_CANVAS_BACKGROUND } from '@/styles/workspaceBackground'
 
 export const useAttackHistoryStyles = makeStyles({
   root: {
@@ -6,7 +14,7 @@ export const useAttackHistoryStyles = makeStyles({
     flexDirection: 'column',
     height: '100%',
     overflow: 'hidden',
-    backgroundColor: tokens.colorNeutralBackground2,
+    backgroundColor: WORKSPACE_CANVAS_BACKGROUND,
   },
   header: {
     padding: `${tokens.spacingVerticalM} ${tokens.spacingHorizontalXXL}`,
@@ -21,12 +29,56 @@ export const useAttackHistoryStyles = makeStyles({
   },
   filters: {
     display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    gap: tokens.spacingVerticalS,
+  },
+  filterRow: {
+    display: 'flex',
     gap: tokens.spacingHorizontalS,
     alignItems: 'center',
     flexWrap: 'wrap',
   },
+  secondaryFilterRow: {
+    display: 'flex',
+    alignItems: 'center',
+    minHeight: MINIMUM_TOUCH_TARGET_SIZE,
+  },
+  // Inner scrolling surface for the virtualized label list. The bound lives here
+  // rather than on the listbox element because autoSize writes an inline max
+  // height on the popup, which would override a class level limit.
+  labelScrollSurface: {
+    // A flex column keeps the virtualizer's spacer elements from collapsing
+    // the visible height when the list shrinks to a few short rows, which
+    // clipped the only option of a one match search by half its height.
+    display: 'flex',
+    flexDirection: 'column',
+    maxHeight: '250px',
+    overflowY: 'auto',
+  },
   filterDropdown: {
     minWidth: '160px',
+    ...mobileTouchTargetHeight,
+    '& > input': {
+      [TOUCH_INPUT_QUERY]: {
+        minHeight: MINIMUM_TOUCH_TARGET_SIZE,
+      },
+    },
+    '& > [role="button"]': {
+      [TOUCH_INPUT_QUERY]: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        minWidth: MINIMUM_TOUCH_TARGET_SIZE,
+        minHeight: MINIMUM_TOUCH_TARGET_SIZE,
+      },
+    },
+  },
+  touchTarget: {
+    ...mobileTouchTarget,
+  },
+  touchTargetHeight: {
+    ...mobileTouchTargetHeight,
   },
   content: {
     flex: 1,
@@ -36,6 +88,7 @@ export const useAttackHistoryStyles = makeStyles({
   table: {
     minWidth: '100%',
     tableLayout: 'auto' as const,
+    backgroundColor: tokens.colorNeutralBackground2,
   },
   colStatus: { minWidth: '100px', whiteSpace: 'nowrap' as const },
   colAttackType: { minWidth: '110px', whiteSpace: 'nowrap' as const },

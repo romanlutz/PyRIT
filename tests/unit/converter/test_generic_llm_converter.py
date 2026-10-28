@@ -1,26 +1,38 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from collections import defaultdict
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from unit.mocks import get_mock_target_identifier
+from unit.mocks import MockPromptTarget, get_mock_target_identifier
 
 from pyrit.converter import (
     LLMGenericTextConverter,
     MaliciousQuestionGeneratorConverter,
+    MathPromptConverter,
     NoiseConverter,
+    ScientificTranslationConverter,
     TenseConverter,
     ToneConverter,
+    ToxicSentenceGeneratorConverter,
+    TranslationConverter,
+    VariationConverter,
 )
 from pyrit.exceptions import InvalidJsonException
-from pyrit.models import Message, MessagePiece, SeedPrompt
+from pyrit.memory import SQLiteMemory
+from pyrit.models import ConverterIdentifier, Message, MessagePiece, SeedPrompt
+from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 from pyrit.prompt_target.common.prompt_target import PromptTarget
+from pyrit.registry import ConverterRegistry
 
 
 @pytest.fixture
-def mock_target() -> PromptTarget:
-    target = MagicMock()
+def mock_target() -> MagicMock:
+    target = MagicMock(spec=PromptTarget)
     response = Message(
         message_pieces=[
             MessagePiece(
@@ -38,9 +50,9 @@ async def test_noise_converter_sets_system_prompt_default(mock_target) -> None:
     converter = NoiseConverter(converter_target=mock_target)
     await converter.convert_async(prompt="being awesome")
 
-    mock_target.set_system_prompt.assert_called_once()
+    mock_target.set_system_prompt_async.assert_called_once()
 
-    system_arg = mock_target.set_system_prompt.call_args[1]["system_prompt"]
+    system_arg = mock_target.set_system_prompt_async.call_args[1]["system_prompt"]
     assert isinstance(system_arg, str)
     assert "Grammar error, Delete random letter" in system_arg
 
@@ -49,9 +61,9 @@ async def test_noise_converter_sets_system_prompt(mock_target) -> None:
     converter = NoiseConverter(converter_target=mock_target, noise="extra random periods")
     await converter.convert_async(prompt="being awesome")
 
-    mock_target.set_system_prompt.assert_called_once()
+    mock_target.set_system_prompt_async.assert_called_once()
 
-    system_arg = mock_target.set_system_prompt.call_args[1]["system_prompt"]
+    system_arg = mock_target.set_system_prompt_async.call_args[1]["system_prompt"]
     assert isinstance(system_arg, str)
     assert "extra random periods" in system_arg
 
@@ -60,9 +72,9 @@ async def test_tone_converter_sets_system_prompt(mock_target) -> None:
     converter = ToneConverter(tone="formal", converter_target=mock_target)
     await converter.convert_async(prompt="being awesome")
 
-    mock_target.set_system_prompt.assert_called_once()
+    mock_target.set_system_prompt_async.assert_called_once()
 
-    system_arg = mock_target.set_system_prompt.call_args[1]["system_prompt"]
+    system_arg = mock_target.set_system_prompt_async.call_args[1]["system_prompt"]
     assert isinstance(system_arg, str)
     assert "formal" in system_arg
 
@@ -71,9 +83,9 @@ async def test_tense_converter_sets_system_prompt(mock_target) -> None:
     converter = TenseConverter(tense="past", converter_target=mock_target)
     await converter.convert_async(prompt="being awesome")
 
-    mock_target.set_system_prompt.assert_called_once()
+    mock_target.set_system_prompt_async.assert_called_once()
 
-    system_arg = mock_target.set_system_prompt.call_args[1]["system_prompt"]
+    system_arg = mock_target.set_system_prompt_async.call_args[1]["system_prompt"]
     assert isinstance(system_arg, str)
     assert "past" in system_arg
 
@@ -82,36 +94,36 @@ async def test_malicious_question_converter_sets_system_prompt(mock_target) -> N
     converter = MaliciousQuestionGeneratorConverter(converter_target=mock_target)
     await converter.convert_async(prompt="being awesome")
 
-    mock_target.set_system_prompt.assert_called_once()
+    mock_target.set_system_prompt_async.assert_called_once()
 
-    system_arg = mock_target.set_system_prompt.call_args[1]["system_prompt"]
+    system_arg = mock_target.set_system_prompt_async.call_args[1]["system_prompt"]
     assert isinstance(system_arg, str)
     assert "Please act as an expert in this domain: being awesome" in system_arg
 
 
 def test_generic_llm_converter_input_supported() -> None:
-    target = MagicMock()
+    target = MagicMock(spec=PromptTarget)
     converter = LLMGenericTextConverter(converter_target=target)
     assert converter.input_supported("text") is True
     assert converter.input_supported("audio_path") is False
 
 
 def test_generic_llm_converter_user_prompt_without_objective_raises() -> None:
-    target = MagicMock()
+    target = MagicMock(spec=PromptTarget)
     user_template = MagicMock()
     with pytest.raises(ValueError):
         LLMGenericTextConverter(converter_target=target, user_prompt_template_with_objective=user_template)
 
 
 def test_generic_llm_converter_init_default_templates_empty() -> None:
-    target = MagicMock()
+    target = MagicMock(spec=PromptTarget)
     converter = LLMGenericTextConverter(converter_target=target)
     assert converter._system_prompt_template is None
     assert converter._user_prompt_template_with_objective is None
 
 
 def test_generic_llm_converter_default_no_retry_exceptions() -> None:
-    target = MagicMock()
+    target = MagicMock(spec=PromptTarget)
     converter = LLMGenericTextConverter(converter_target=target)
     assert converter._retry_exceptions == ()
 
@@ -120,7 +132,7 @@ def test_generic_llm_converter_class_attr_retry_exceptions() -> None:
     class _RetryingConverter(LLMGenericTextConverter):
         RETRY_EXCEPTIONS = (ValueError,)
 
-    target = MagicMock()
+    target = MagicMock(spec=PromptTarget)
     converter = _RetryingConverter(converter_target=target)
     assert converter._retry_exceptions == (ValueError,)
 
@@ -129,7 +141,7 @@ def test_generic_llm_converter_instance_retry_exceptions_overrides_class_attr() 
     class _RetryingConverter(LLMGenericTextConverter):
         RETRY_EXCEPTIONS = (ValueError,)
 
-    target = MagicMock()
+    target = MagicMock(spec=PromptTarget)
     converter = _RetryingConverter(converter_target=target, retry_exceptions=(KeyError,))
     assert converter._retry_exceptions == (KeyError,)
 
@@ -181,7 +193,7 @@ async def test_convert_async_input_validation_raises_before_set_system_prompt(mo
     converter = LLMGenericTextConverter(converter_target=mock_target, system_prompt_template=system_template)
     with pytest.raises(ValueError, match="Input type not supported"):
         await converter.convert_async(prompt="hello", input_type="image_path")
-    mock_target.set_system_prompt.assert_not_called()
+    mock_target.set_system_prompt_async.assert_not_called()
     mock_target.send_prompt_async.assert_not_called()
 
 
@@ -292,3 +304,294 @@ async def test_send_with_retries_uses_exponential_wait_when_max_seconds_provided
     # waits should be > 0 between attempts (exponential backoff)
     nonzero_waits = [c for c in mock_sleep.call_args_list if c.args[0] > 0]
     assert len(nonzero_waits) >= 1
+
+
+def _custom_template(value: str, *parameters: str) -> SeedPrompt:
+    return SeedPrompt(value=value, data_type="text", parameters=list(parameters))
+
+
+@pytest.mark.parametrize(
+    "converter_class, kwargs, template",
+    [
+        (ToneConverter, {"tone": "angry"}, _custom_template("Rewrite in a {{ tone }} tone, in French.", "tone")),
+        (TenseConverter, {"tense": "past"}, _custom_template("Use the {{ tense }} tense, as a poem.", "tense")),
+        (
+            TranslationConverter,
+            {"language": "french"},
+            _custom_template("Translate to {{ language }} slang.", "language"),
+        ),
+        (
+            NoiseConverter,
+            {},
+            _custom_template("Add {{ number_errors }} typos: {{ noise }}", "noise", "number_errors"),
+        ),
+        (ScientificTranslationConverter, {"mode": "academic"}, _custom_template("Rewrite as a lab report.")),
+        (
+            VariationConverter,
+            {},
+            _custom_template("Give {{ number_iterations }} rhyming variations.", "number_iterations"),
+        ),
+    ],
+)
+def test_llm_converter_identifier_includes_custom_prompt_template(
+    mock_target, converter_class, kwargs, template
+) -> None:
+    default = converter_class(converter_target=mock_target, **kwargs)
+    custom = converter_class(converter_target=mock_target, prompt_template=template, **kwargs)
+    same_custom = converter_class(converter_target=mock_target, prompt_template=template, **kwargs)
+
+    default_params = default.get_identifier().params
+    custom_params = custom.get_identifier().params
+    assert default_params["system_prompt_template_hash"] != custom_params["system_prompt_template_hash"]
+    assert default.get_identifier().hash != custom.get_identifier().hash
+    assert custom.get_identifier().hash == same_custom.get_identifier().hash
+    for key, value in kwargs.items():
+        assert custom_params[key] == value
+
+
+def test_generic_llm_converter_identifier_includes_template_parameters(mock_target) -> None:
+    template = _custom_template("Translate the text into {{ language }}.", "language")
+
+    french = LLMGenericTextConverter(converter_target=mock_target, system_prompt_template=template, language="French")
+    spanish = LLMGenericTextConverter(converter_target=mock_target, system_prompt_template=template, language="Spanish")
+    same_french = LLMGenericTextConverter(
+        converter_target=mock_target, system_prompt_template=template, language="French"
+    )
+    no_parameters = LLMGenericTextConverter(converter_target=mock_target, system_prompt_template=template)
+
+    assert len(french.get_identifier().params["template_parameters_hash"]) == 16
+    assert french.get_identifier().hash != spanish.get_identifier().hash
+    assert french.get_identifier().hash == same_french.get_identifier().hash
+    assert no_parameters.get_identifier().params.get("template_parameters_hash") is None
+
+
+async def _sent_prompt_async(converter: LLMGenericTextConverter, target: MagicMock) -> str:
+    await converter.convert_async(prompt="hello")
+    value = target.send_prompt_async.call_args.kwargs["message"].message_pieces[0].converted_value
+    assert isinstance(value, str)
+    return value
+
+
+@dataclass
+class _TemplateConfig:
+    language: str = field(repr=False)
+
+
+@dataclass(slots=True)
+class _SlottedTemplateConfig:
+    language: str = field(repr=False)
+
+
+class _StatefulTemplateValue:
+    def __init__(self, language: str) -> None:
+        self.language = language
+
+    def __repr__(self) -> str:
+        return "template configuration"
+
+
+class _TemplateText(str):
+    __slots__ = ("__dict__",)
+
+
+def _empty_list() -> list[str]:
+    return []
+
+
+def _empty_dict() -> dict[str, str]:
+    return {}
+
+
+def _colliding_sets() -> tuple[set[int], set[int]]:
+    first: set[int] = set()
+    second: set[int] = set()
+    for value in (0, 8):
+        first.add(value)
+    for value in (8, 0):
+        second.add(value)
+    assert list(first) != list(second)
+    return first, second
+
+
+@pytest.mark.parametrize(
+    "template_value, first_words, second_words",
+    [
+        ("{{ objective }} {{ words }}", ("alpha", "beta"), ["alpha", "beta"]),
+        ("{{ objective }}{% for word in words %} {{ word }}{% endfor %}", {"a": 1, "b": 2}, {"b": 2, "a": 1}),
+        ("{{ objective }} {{ words }}", 1, 1.0),
+        ("{{ objective }} {{ words }}", {1: "one"}, {"1": "one"}),
+        (
+            "{{ objective }} {{ words }}",
+            PureWindowsPath("styles", "noir.yaml"),
+            PurePosixPath("styles", "noir.yaml"),
+        ),
+        ("{{ objective }}{% for word in words %} {{ word }}{% endfor %}", *_colliding_sets()),
+        ("{{ objective }} {{ words.missing }}", defaultdict(list), defaultdict(dict)),
+        ("{{ objective }} {{ words.missing }}", defaultdict(_empty_list), defaultdict(_empty_dict)),
+        ("{{ objective }} {{ words }}", _TemplateText("French"), _TemplateText("Spanish")),
+        ("{{ objective }} {{ words.language }}", _TemplateConfig("French"), _TemplateConfig("Spanish")),
+        (
+            "{{ objective }} {{ words.language }}",
+            _SlottedTemplateConfig("French"),
+            _SlottedTemplateConfig("Spanish"),
+        ),
+        (
+            "{{ objective }} {{ words.language }}",
+            _StatefulTemplateValue("French"),
+            _StatefulTemplateValue("Spanish"),
+        ),
+    ],
+)
+async def test_generic_llm_converter_identifier_distinguishes_values_that_render_differently(
+    mock_target, template_value, first_words, second_words
+) -> None:
+    template = _custom_template(template_value, "objective", "words")
+    first = LLMGenericTextConverter(
+        converter_target=mock_target, user_prompt_template_with_objective=template, words=first_words
+    )
+    second = LLMGenericTextConverter(
+        converter_target=mock_target, user_prompt_template_with_objective=template, words=second_words
+    )
+
+    assert await _sent_prompt_async(first, mock_target) != await _sent_prompt_async(second, mock_target)
+    assert first.get_identifier().hash != second.get_identifier().hash
+
+    # Both configurations get their own default registry name instead of colliding.
+    instances = ConverterRegistry().instances
+    instances.register(first)
+    instances.register(second)
+    assert instances.get(first.get_identifier().unique_name) is first
+    assert instances.get(second.get_identifier().unique_name) is second
+
+
+def test_generic_llm_converter_identifier_is_stable_for_equal_template_parameters(mock_target) -> None:
+    template = _custom_template("{{ objective }} {{ words }} {{ path }} {{ tags }}", "objective")
+    tags = {"x", "y", "z"}
+
+    first = LLMGenericTextConverter(
+        converter_target=mock_target,
+        user_prompt_template_with_objective=template,
+        words={"alpha": ["a", ("b", 2)]},
+        path=Path("styles") / "noir.yaml",
+        tags=tags,
+    )
+    # Same values, keyword arguments given in a different order.
+    second = LLMGenericTextConverter(
+        converter_target=mock_target,
+        user_prompt_template_with_objective=template,
+        tags=tags,
+        path=Path("styles") / "noir.yaml",
+        words={"alpha": ["a", ("b", 2)]},
+    )
+
+    assert first.get_identifier().hash == second.get_identifier().hash
+
+
+@pytest.mark.parametrize("config_type", [_TemplateConfig, _SlottedTemplateConfig, _StatefulTemplateValue])
+def test_generic_llm_converter_identifier_is_stable_for_equal_object_state(
+    mock_target: MagicMock, config_type: type
+) -> None:
+    template = _custom_template("{{ objective }} {{ words.language }}", "objective", "words")
+    first = LLMGenericTextConverter(
+        converter_target=mock_target, user_prompt_template_with_objective=template, words=config_type("French")
+    )
+    second = LLMGenericTextConverter(
+        converter_target=mock_target, user_prompt_template_with_objective=template, words=config_type("French")
+    )
+    assert first.get_identifier().hash == second.get_identifier().hash
+
+
+def test_generic_llm_converter_without_parameters_preserves_identifier_hash(mock_target: MagicMock) -> None:
+    converter = LLMGenericTextConverter(converter_target=mock_target)
+    previous_identifier = converter._create_identifier(
+        params={"system_prompt_template_hash": None, "user_prompt_template_hash": None},
+        converter_target=mock_target.get_identifier(),
+    )
+    assert converter.get_identifier().hash == previous_identifier.hash
+
+
+class _UnrepresentableValue:
+    def __repr__(self) -> str:
+        raise RuntimeError("no repr")
+
+    def __str__(self) -> str:
+        return "custom"
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        {1: "first", "two": "second"},
+        {("a", "b"): "pair", None: "none"},
+        {frozenset({1, "x"}), 2.5, b"bytes"},
+        _UnrepresentableValue(),
+    ],
+)
+async def test_generic_llm_converter_converts_with_any_renderable_template_parameter(mock_target, words) -> None:
+    self_referencing: list[Any] = ["loop"]
+    self_referencing.append(self_referencing)
+    converter = LLMGenericTextConverter(
+        converter_target=mock_target,
+        user_prompt_template_with_objective=_custom_template("{{ objective }} {{ words }} {{ loop }}", "objective"),
+        words=words,
+        loop=self_referencing,
+    )
+
+    result = await converter.convert_async(prompt="hello")
+
+    assert result.output_text == "prompt value"
+    request = mock_target.send_prompt_async.call_args.kwargs["message"]
+    assert request.message_pieces[0].converter_identifiers[0].hash == converter.get_identifier().hash
+    assert len(converter.get_identifier().params["template_parameters_hash"]) == 16
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_generic_llm_converter_distinct_path_identifiers_persist_async(sqlite_instance: SQLiteMemory) -> None:
+    converter_target = MockPromptTarget()
+    objective_target = MockPromptTarget()
+    normalizer = PromptNormalizer()
+    template = _custom_template("{{ objective }} {{ path }}", "objective", "path")
+    converters = [
+        LLMGenericTextConverter(
+            converter_target=converter_target, user_prompt_template_with_objective=template, path=path
+        )
+        for path in (PureWindowsPath("styles", "noir.yaml"), PurePosixPath("styles", "noir.yaml"))
+    ]
+
+    for converter in converters:
+        await normalizer.send_prompt_async(
+            message=MessagePiece(role="user", original_value="hello").to_message(),
+            target=objective_target,
+            request_converter_configurations=[ConverterConfiguration(converters=[converter])],
+        )
+
+    assert converter_target.prompt_sent == ["hello styles\\noir.yaml", "hello styles/noir.yaml"]
+    identifiers = await sqlite_instance.get_converter_identifiers_async(class_name="LLMGenericTextConverter")
+    assert {identifier.hash for identifier in identifiers} == {
+        converter.get_identifier().hash for converter in converters
+    }
+    assert len(identifiers) == 2
+    for converter in converters:
+        identifier = converter.get_identifier()
+        assert ConverterIdentifier.model_validate_json(identifier.model_dump_json()).hash == identifier.hash
+
+
+@pytest.mark.parametrize(
+    "converter_class",
+    [MathPromptConverter, MaliciousQuestionGeneratorConverter, ToxicSentenceGeneratorConverter],
+)
+async def test_per_call_prompt_does_not_change_converter_identifier(mock_target, converter_class) -> None:
+    read_before = converter_class(converter_target=mock_target)
+    read_after = converter_class(converter_target=mock_target)
+    identifier_before_conversion = read_before.get_identifier()
+
+    sent_identifiers = []
+    for converter in (read_before, read_after):
+        for prompt in ("hello", "goodbye"):
+            await converter.convert_async(prompt=prompt)
+            request = mock_target.send_prompt_async.call_args.kwargs["message"]
+            sent_identifiers.append(request.message_pieces[0].converter_identifiers[0])
+
+    assert read_after.get_identifier().hash == identifier_before_conversion.hash
+    assert {identifier.hash for identifier in sent_identifiers} == {identifier_before_conversion.hash}
+    assert identifier_before_conversion.params.get("template_parameters_hash") is None

@@ -11,11 +11,12 @@ import logging
 import random
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, cast
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from pyrit.common.utils import combine_list
 from pyrit.models.literals import SeedType  # noqa: TC001  (runtime-required by Pydantic field annotations)
 from pyrit.models.seeds.attack_seed_group import AttackSeedGroup
 from pyrit.models.seeds.seed import (  # AwareDatetimeUTC is runtime-required by Pydantic
@@ -29,51 +30,40 @@ from pyrit.models.seeds.seed_group import (  # runtime-required by Pydantic fiel
 )
 from pyrit.models.seeds.seed_objective import SeedObjective
 from pyrit.models.seeds.seed_prompt import SeedPrompt
+from pyrit.models.seeds.seed_simulated_conversation import SeedSimulatedConversation
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from pydantic.types import PositiveInt
+    from pydantic.types import NonNegativeInt
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_count(*, name: str, count: object) -> None:
+    """
+    Reject a prompt count that is not a non-negative integer.
+
+    The count annotations on the public methods are not enforced at runtime, and a
+    negative count would silently slice from the other end of the prompt list.
+
+    Args:
+        name (str): The parameter name, used in the error message.
+        count (object): The value to validate.
+
+    Raises:
+        ValueError: If ``count`` is a bool, not an integer, or negative.
+    """
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError(f"{name} must be a non-negative integer, got {count!r}")
+
 
 # Dataset-level defaults that get merged into each dict seed when missing on the seed.
 # date_added/added_by/metadata are intentionally excluded — per-seed Pydantic defaults
 # (default_factory) are the source of truth.
 _SCALAR_DEFAULT_KEYS = ("name", "description", "source")
 _LIST_DEFAULT_KEYS = ("harm_categories", "authors", "groups")
-
-
-def _merge_unique(left: Any, right: Any) -> list[str]:
-    """
-    Concatenate two list-or-str inputs into a deterministic, order-preserving deduped list.
-
-    Treats ``None`` as empty, accepts bare strings as single-element lists, and preserves the
-    order of first occurrence (left first, then any new items from right). Used instead of
-    ``utils.combine_list`` because the latter goes through ``set()`` and is nondeterministic
-    across processes for non-trivial inputs.
-
-    Args:
-        left: First list (or string) of values; falsy values are treated as empty.
-        right: Second list (or string) of values; falsy values are treated as empty.
-
-    Returns:
-        list[str]: Deduplicated concatenation, preserving first-occurrence order.
-    """
-
-    def _as_list(v: Any) -> list[str]:
-        if not v:
-            return []
-        return [v] if isinstance(v, str) else list(v)
-
-    seen: set[str] = set()
-    result: list[str] = []
-    for item in _as_list(left) + _as_list(right):
-        if item not in seen:
-            seen.add(item)
-            result.append(item)
-    return result
 
 
 class SeedDataset(BaseModel):
@@ -93,7 +83,7 @@ class SeedDataset(BaseModel):
     authors: list[str] | None = Field(default_factory=list)
     groups: list[str] | None = Field(default_factory=list)
     source: str | None = None
-    date_added: AwareDatetimeUTC | None = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    date_added: AwareDatetimeUTC | None = Field(default_factory=lambda: datetime.now(tz=UTC))
     added_by: str | None = None
     # The default seed type for items that don't specify their own ("prompt", "objective", ...).
     seed_type: SeedType | None = None
@@ -115,6 +105,7 @@ class SeedDataset(BaseModel):
           when the seed has none.
         - List defaults (harm_categories, authors, groups) are concatenated with deterministic
           order-preserving dedup (dataset values first, then seed-only additions).
+          Bare empty strings are treated as missing metadata.
         - For prompts: ``data_type`` falls back to the dataset's; ``role`` defaults to ``"user"``.
         - For objective/simulated_conversation: ``data_type``/``role``/``sequence``/
           ``parameters`` are stripped — they aren't valid fields on those classes and a
@@ -160,7 +151,7 @@ class SeedDataset(BaseModel):
                 p["dataset_name"] = default_dataset_name
 
             for key in _LIST_DEFAULT_KEYS:
-                p[key] = _merge_unique(data.get(key), p.get(key))
+                p[key] = combine_list(data.get(key) or None, p.get(key) or None)
 
             if seed_type == "prompt":
                 if not p.get("data_type"):
@@ -206,8 +197,8 @@ class SeedDataset(BaseModel):
     def get_values(
         self,
         *,
-        first: PositiveInt | None = None,
-        last: PositiveInt | None = None,
+        first: NonNegativeInt | None = None,
+        last: NonNegativeInt | None = None,
         harm_categories: Sequence[str] | None = None,
     ) -> Sequence[str]:
         """
@@ -222,7 +213,13 @@ class SeedDataset(BaseModel):
         Returns:
             Sequence[str]: A list of prompt values.
 
+        Raises:
+            ValueError: If ``first`` or ``last`` is not a non-negative integer.
         """
+        for name, count in (("first", first), ("last", last)):
+            if count is not None:
+                _validate_count(name=name, count=count)
+
         # Filter by harm categories if specified
         seeds = self.seeds
         if harm_categories:
@@ -244,7 +241,9 @@ class SeedDataset(BaseModel):
 
         return first_part + last_part
 
-    def get_random_values(self, *, number: PositiveInt, harm_categories: Sequence[str] | None = None) -> Sequence[str]:
+    def get_random_values(
+        self, *, number: NonNegativeInt, harm_categories: Sequence[str] | None = None
+    ) -> Sequence[str]:
         """
         Extract and return random prompt values from the dataset.
 
@@ -256,12 +255,15 @@ class SeedDataset(BaseModel):
         Returns:
             Sequence[str]: A list of prompt values.
 
+        Raises:
+            ValueError: If ``number`` is not a non-negative integer.
         """
+        _validate_count(name="number", count=number)
         prompts = self.get_values(harm_categories=harm_categories)
         return random.sample(prompts, min(len(prompts), number))
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> SeedDataset:
+    def from_dict(cls, data: dict[str, Any]) -> Self:
         """
         Build a SeedDataset, assigning per-seed ``prompt_group_id`` by alias.
 
@@ -274,7 +276,7 @@ class SeedDataset(BaseModel):
             data (dict[str, Any]): Dataset payload with top-level defaults and seed entries.
 
         Returns:
-            SeedDataset: Constructed dataset.
+            Self: Constructed dataset.
 
         Raises:
             ValueError: If any seed entry includes a pre-set ``prompt_group_id``.
@@ -327,7 +329,7 @@ class SeedDataset(BaseModel):
                 prompt["prompt_group_id"] = uuid.uuid4()
 
     @staticmethod
-    def group_seed_prompts_by_prompt_group_id(seeds: Sequence[Seed]) -> Sequence[SeedGroup]:
+    def group_seed_prompts_by_prompt_group_id(seeds: Sequence[Seed[Any]]) -> Sequence[SeedGroup]:
         """
         Group the given list of seeds by prompt_group_id and create
         SeedGroup or AttackSeedGroup instances.
@@ -344,10 +346,15 @@ class SeedDataset(BaseModel):
             prompt_group_id. Each group will be ordered by the sequence number of
             the seeds, if available.
 
+        Raises:
+            ValueError: If a seed has an unsupported concrete type.
+
         """
         # Group seeds by `prompt_group_id`
-        grouped_seeds: dict[uuid.UUID, list[Seed]] = defaultdict(list)
+        grouped_seeds: dict[uuid.UUID, list[SeedUnion]] = defaultdict(list)
         for seed in seeds:
+            if not isinstance(seed, (SeedPrompt, SeedObjective, SeedSimulatedConversation)):
+                raise ValueError(f"Unsupported seed type: {type(seed).__name__}")
             if seed.prompt_group_id:
                 grouped_seeds[seed.prompt_group_id].append(seed)
             else:
@@ -357,14 +364,14 @@ class SeedDataset(BaseModel):
         seed_groups: list[SeedGroup] = []
         for group_seeds in grouped_seeds.values():
             if len(group_seeds) > 1:
-                group_seeds.sort(key=lambda s: s.sequence if hasattr(s, "sequence") else 0)
+                group_seeds.sort(key=lambda s: getattr(s, "sequence", 0))
 
             # Try to create a AttackSeedGroup first; fall back to SeedGroup if validation fails
             try:
-                attack_group = AttackSeedGroup(seeds=cast("list[SeedUnion]", group_seeds))
+                attack_group = AttackSeedGroup(seeds=group_seeds)
                 seed_groups.append(attack_group)
             except ValueError:
-                seed_groups.append(SeedGroup(seeds=cast("list[SeedUnion]", group_seeds)))
+                seed_groups.append(SeedGroup(seeds=group_seeds))
 
         return seed_groups
 

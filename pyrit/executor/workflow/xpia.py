@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, overload
 
-from pyrit.common.utils import combine_dict, get_kwarg_param
+from pyrit.common.utils import combine_dict, get_kwarg_param, is_numeric_value
 from pyrit.executor.core import StrategyConverterConfig
 from pyrit.executor.workflow.core import (
     WorkflowContext,
@@ -21,6 +21,7 @@ from pyrit.models import (
     Message,
     MessagePiece,
     Score,
+    UndeterminedScoreError,
 )
 from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import PromptTarget
@@ -112,8 +113,11 @@ class XPIAResult(WorkflowResult):
         """
         if self.score is None:
             return False
-        score_value = self.score.get_value()
-        return score_value > 0 if isinstance(score_value, (int, float)) else False
+        try:
+            score_value = self.score.get_value()
+        except UndeterminedScoreError:
+            return False
+        return score_value > 0 if is_numeric_value(score_value) else False
 
     @property
     def status(self) -> XPIAStatus:
@@ -123,7 +127,7 @@ class XPIAResult(WorkflowResult):
         Returns:
             XPIAStatus: The status of the attack result.
         """
-        if self.score is None:
+        if self.score is None or self.score.is_undetermined:
             return XPIAStatus.UNKNOWN
         return XPIAStatus.SUCCESS if self.success else XPIAStatus.FAILURE
 
@@ -329,9 +333,6 @@ class XPIAWorkflow(WorkflowStrategy[XPIAContext, XPIAResult], Identifiable):
             f'converter operations) "{attack_content_value}"',
         )
 
-        if context.memory_labels:
-            for piece in context.attack_content.message_pieces:
-                piece.labels = context.memory_labels
         setup_response = await self._prompt_normalizer.send_prompt_async(
             message=context.attack_content,
             request_converter_configurations=self._request_converters,
@@ -367,16 +368,18 @@ class XPIAWorkflow(WorkflowStrategy[XPIAContext, XPIAResult], Identifiable):
         processing_response = await context.processing_callback()
         if self._memory is None:
             raise RuntimeError("Memory not initialized")
-        self._memory.add_message_to_memory(
-            request=Message(
-                message_pieces=[
-                    MessagePiece(
-                        conversation_id=context.processing_conversation_id,
-                        original_value=processing_response,
-                        original_value_data_type="text",
-                        role="assistant",
-                    )
-                ],
+        (
+            await self._memory.add_message_to_memory_async(
+                request=Message(
+                    message_pieces=[
+                        MessagePiece(
+                            conversation_id=context.processing_conversation_id,
+                            original_value=processing_response,
+                            original_value_data_type="text",
+                            role="assistant",
+                        )
+                    ],
+                )
             )
         )
         self._logger.info(f'Received the following response from the processing target "{processing_response}"')
@@ -570,9 +573,6 @@ class XPIATestWorkflow(XPIAWorkflow):
             # processing_prompt is validated to be non-None in _validate_context
             if context.processing_prompt is None:
                 raise RuntimeError("context.processing_prompt is not initialized")
-            if context.memory_labels:
-                for piece in context.processing_prompt.message_pieces:
-                    piece.labels = context.memory_labels
             response = await self._prompt_normalizer.send_prompt_async(
                 message=context.processing_prompt,
                 target=self._processing_target,

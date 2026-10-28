@@ -7,12 +7,15 @@ import logging
 import os
 from collections.abc import MutableSequence
 from tempfile import NamedTemporaryFile
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 from openai import APIStatusError, BadRequestError, ContentFilterFinishReasonError, RateLimitError
-from openai.types.chat import ChatCompletion
+from openai.types.chat import ChatCompletion, ChatCompletionMessage
+from openai.types.chat.chat_completion import Choice
 from unit.mocks import (
     get_image_message_piece,
     get_sample_conversations,
@@ -52,6 +55,17 @@ def create_mock_completion(content: str = "hi", finish_reason: str = "stop"):
         {"choices": [{"finish_reason": finish_reason, "message": {"content": content}}]}
     )
     return mock_completion
+
+
+def _mock_usage(*, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> SimpleNamespace:
+    """Build a Chat Completions ``usage`` stand-in with no nested detail breakdowns."""
+    return SimpleNamespace(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        prompt_tokens_details=None,
+        completion_tokens_details=None,
+    )
 
 
 @pytest.fixture
@@ -103,6 +117,16 @@ def test_init_with_no_endpoint_uri_var_raises():
 def test_init_with_no_additional_request_headers_var_raises():
     with patch.dict(os.environ, {}, clear=True), pytest.raises(ValueError):
         OpenAIChatTarget(model_name="gpt-4", endpoint="", api_key="xxxxx", headers="")
+
+
+def test_init_with_removed_max_tokens_raises(patch_central_database):
+    with pytest.raises(TypeError, match="max_tokens"):
+        OpenAIChatTarget(
+            model_name="gpt-4",
+            endpoint="https://mock.azure.com/",
+            api_key="mock-api-key",
+            max_tokens=100,
+        )
 
 
 async def test_build_chat_messages_for_multi_modal(target: OpenAIChatTarget):
@@ -210,7 +234,6 @@ async def test_construct_request_body_removes_empty_values(
     jrc = JsonResponseConfig.from_metadata(metadata=None)
     body = await target._construct_request_body_async(conversation=[request], json_config=jrc)
     assert "max_completion_tokens" not in body
-    assert "max_tokens" not in body
     assert "temperature" not in body
     assert "top_p" not in body
     assert "frequency_penalty" not in body
@@ -264,9 +287,9 @@ async def test_send_prompt_async_empty_response_adds_to_memory(openai_response_j
             )
         ),
     )
-    mock_memory = MagicMock()
-    mock_memory.get_conversation_messages.return_value = []
-    mock_memory.add_message_to_memory = AsyncMock()
+    mock_memory = MagicMock(spec=MemoryInterface)
+    mock_memory.get_conversation_messages_async = AsyncMock(return_value=[])
+    mock_memory.add_message_to_memory_async = AsyncMock()
 
     target._memory = mock_memory
 
@@ -282,7 +305,6 @@ async def test_send_prompt_async_empty_response_adds_to_memory(openai_response_j
                 converted_value="hello",
                 original_value_data_type="text",
                 converted_value_data_type="text",
-                labels={"test": "test"},
             ),
             MessagePiece(
                 role="user",
@@ -291,7 +313,6 @@ async def test_send_prompt_async_empty_response_adds_to_memory(openai_response_j
                 converted_value=tmp_file_name,
                 original_value_data_type="image_path",
                 converted_value_data_type="image_path",
-                labels={"test": "test"},
             ),
         ]
     )
@@ -306,7 +327,7 @@ async def test_send_prompt_async_empty_response_adds_to_memory(openai_response_j
             return_value=mock_completion
         )
         target._memory = MagicMock(MemoryInterface)
-        target._memory.get_conversation_messages.return_value = []
+        target._memory.get_conversation_messages_async = AsyncMock(return_value=[])
 
         with pytest.raises(EmptyResponseException):
             await target.send_prompt_async(message=message)
@@ -315,9 +336,9 @@ async def test_send_prompt_async_empty_response_adds_to_memory(openai_response_j
 async def test_send_prompt_async_rate_limit_exception_adds_to_memory(
     target: OpenAIChatTarget,
 ):
-    mock_memory = MagicMock()
-    mock_memory.get_conversation_messages.return_value = []
-    mock_memory.add_message_to_memory = AsyncMock()
+    mock_memory = MagicMock(spec=MemoryInterface)
+    mock_memory.get_conversation_messages_async = AsyncMock(return_value=[])
+    mock_memory.add_message_to_memory_async = AsyncMock()
 
     target._memory = mock_memory
 
@@ -336,9 +357,9 @@ async def test_send_prompt_async_rate_limit_exception_adds_to_memory(
 
 
 async def test_send_prompt_async_bad_request_error_adds_to_memory(target: OpenAIChatTarget):
-    mock_memory = MagicMock()
-    mock_memory.get_conversation_messages.return_value = []
-    mock_memory.add_message_to_memory = AsyncMock()
+    mock_memory = MagicMock(spec=MemoryInterface)
+    mock_memory.get_conversation_messages_async = AsyncMock(return_value=[])
+    mock_memory.add_message_to_memory_async = AsyncMock()
 
     target._memory = mock_memory
 
@@ -388,7 +409,6 @@ async def test_send_prompt_async(openai_response_json: dict, patch_central_datab
                 converted_value="hello",
                 original_value_data_type="text",
                 converted_value_data_type="text",
-                labels={"test": "test"},
             ),
             MessagePiece(
                 role="user",
@@ -397,7 +417,6 @@ async def test_send_prompt_async(openai_response_json: dict, patch_central_datab
                 converted_value=tmp_file_name,
                 original_value_data_type="image_path",
                 converted_value_data_type="image_path",
-                labels={"test": "test"},
             ),
         ]
     )
@@ -449,7 +468,6 @@ async def test_send_prompt_async_empty_response_retries(openai_response_json: di
                 converted_value="hello",
                 original_value_data_type="text",
                 converted_value_data_type="text",
-                labels={"test": "test"},
             ),
             MessagePiece(
                 role="user",
@@ -458,7 +476,6 @@ async def test_send_prompt_async_empty_response_retries(openai_response_json: di
                 converted_value=tmp_file_name,
                 original_value_data_type="image_path",
                 converted_value_data_type="image_path",
-                labels={"test": "test"},
             ),
         ]
     )
@@ -473,7 +490,7 @@ async def test_send_prompt_async_empty_response_retries(openai_response_json: di
             return_value=mock_completion
         )
         target._memory = MagicMock(MemoryInterface)
-        target._memory.get_conversation_messages.return_value = []
+        target._memory.get_conversation_messages_async = AsyncMock(return_value=[])
 
         with pytest.raises(EmptyResponseException):
             await target.send_prompt_async(message=message)
@@ -534,6 +551,108 @@ async def test_send_prompt_async_content_filter_200(target: OpenAIChatTarget):
     assert len(response[0].message_pieces) == 1
     assert response[0].message_pieces[0].response_error == "blocked"
     assert response[0].message_pieces[0].converted_value_data_type == "error"
+    assert response[0].message_pieces[0].structured_refusal is None
+
+
+async def test_send_prompt_async_captures_finish_reason(target: OpenAIChatTarget):
+    message = Message(message_pieces=[MessagePiece(role="user", conversation_id="c", original_value="hi")])
+    mock_completion = create_mock_completion(content="hello", finish_reason="stop")
+    target._async_client.chat.completions.create = AsyncMock(  # type: ignore[method-assign]
+        return_value=mock_completion
+    )
+
+    response = await target.send_prompt_async(message=message)
+
+    assert response[0].message_pieces[0].prompt_metadata["finish_reason"] == "stop"
+
+
+async def test_content_filter_200_captures_token_usage_and_finish_reason(target: OpenAIChatTarget):
+    """A blocked response still reports what it consumed, which is exactly where it matters most."""
+    message = Message(message_pieces=[MessagePiece(role="user", conversation_id="c", original_value="harmful")])
+    mock_completion = create_mock_completion(content="partial", finish_reason="content_filter")
+    mock_completion.usage = _mock_usage(prompt_tokens=12, completion_tokens=5, total_tokens=17)
+    target._async_client.chat.completions.create = AsyncMock(  # type: ignore[method-assign]
+        return_value=mock_completion
+    )
+
+    response = await target.send_prompt_async(message=message)
+
+    piece = response[0].message_pieces[0]
+    assert piece.response_error == "blocked"
+    assert piece.prompt_metadata["finish_reason"] == "content_filter"
+    assert piece.prompt_metadata["token_usage_input_tokens"] == 12
+    assert piece.prompt_metadata["token_usage_output_tokens"] == 5
+    assert piece.prompt_metadata["token_usage_total_tokens"] == 17
+
+
+async def test_truncated_empty_response_captures_finish_reason(target: OpenAIChatTarget):
+    """The graceful empty-truncated fallback must carry metadata too."""
+    message = Message(message_pieces=[MessagePiece(role="user", conversation_id="c", original_value="hi")])
+    mock_completion = create_mock_completion(content=None, finish_reason="length")
+    mock_completion.usage = _mock_usage(prompt_tokens=9, completion_tokens=100, total_tokens=109)
+    target._async_client.chat.completions.create = AsyncMock(  # type: ignore[method-assign]
+        return_value=mock_completion
+    )
+
+    response = await target.send_prompt_async(message=message)
+
+    piece = response[0].message_pieces[0]
+    assert piece.is_truncated is True
+    assert piece.prompt_metadata["finish_reason"] == "length"
+    assert piece.prompt_metadata["token_usage_output_tokens"] == 100
+
+
+async def test_sdk_content_filter_error_omits_finish_reason(
+    target: OpenAIChatTarget, sample_conversations: MutableSequence[MessagePiece]
+):
+    """The SDK-raised path has no response object to read, so no metadata is invented."""
+    message_piece = sample_conversations[0]
+    message_piece.conversation_id = "test-conv-id"
+    request = Message(message_pieces=[message_piece])
+
+    with patch.object(target._async_client.chat.completions, "create", new_callable=AsyncMock) as mock_create:
+        mock_create.side_effect = ContentFilterFinishReasonError()
+        response = await target.send_prompt_async(message=request)
+
+    piece = response[0].message_pieces[0]
+    assert piece.response_error == "blocked"
+    assert "finish_reason" not in piece.prompt_metadata
+
+
+async def test_send_prompt_async_structured_refusal(target: OpenAIChatTarget):
+    refusal = "I cannot assist with that request."
+    completion = ChatCompletion(
+        id="refusal-completion",
+        choices=[
+            Choice(
+                finish_reason="stop",
+                index=0,
+                logprobs=None,
+                message=ChatCompletionMessage(
+                    content=None,
+                    refusal=refusal,
+                    role="assistant",
+                ),
+            )
+        ],
+        created=0,
+        model="gpt-test",
+        object="chat.completion",
+    )
+    target._async_client.chat.completions.create = AsyncMock(return_value=completion)  # type: ignore[method-assign]
+    message = Message(
+        message_pieces=[MessagePiece(role="user", conversation_id="refusal-conversation", original_value="Hello")]
+    )
+
+    response = await target.send_prompt_async(message=message)
+
+    assert len(response) == 1
+    assert len(response[0].message_pieces) == 1
+    refusal_piece = response[0].message_pieces[0]
+    assert refusal_piece.original_value_data_type == "error"
+    assert refusal_piece.response_error == "blocked"
+    assert json.loads(refusal_piece.original_value)["message"] == refusal
+    assert refusal_piece.structured_refusal == refusal
 
 
 def test_validate_request_unsupported_data_types(target: OpenAIChatTarget):
@@ -568,6 +687,7 @@ def test_inheritance_from_prompt_target(target: OpenAIChatTarget):
     assert target.capabilities.supports_editable_history is True
 
 
+@pytest.mark.usefixtures("patch_central_database")
 def test_inheritance_from_prompt_target_base():
     """OpenAIChatTarget (via OpenAIChatTargetBase) inherits from PromptTarget."""
     target = OpenAIChatTarget(model_name="test-model", endpoint="https://test.com", api_key="test-key")
@@ -627,8 +747,8 @@ def test_is_response_format_json_no_metadata(target: OpenAIChatTarget):
 
 async def test_send_prompt_async_content_filter_400(target: OpenAIChatTarget):
     mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation_messages.return_value = []
-    mock_memory.add_message_to_memory = AsyncMock()
+    mock_memory.get_conversation_messages_async = AsyncMock(return_value=[])
+    mock_memory.add_message_to_memory_async = AsyncMock()
     target._memory = mock_memory
 
     with (
@@ -679,8 +799,8 @@ async def test_send_prompt_async_other_http_error(patch_central_database):
         converted_value_data_type="text",
     )
     message = Message(message_pieces=[message_piece])
-    target._memory = MagicMock()
-    target._memory.get_conversation_messages.return_value = []
+    target._memory = MagicMock(spec=MemoryInterface)
+    target._memory.get_conversation_messages_async = AsyncMock(return_value=[])
 
     # Create proper mock request and response for APIStatusError
     mock_request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
@@ -728,33 +848,25 @@ def test_set_auth_with_api_key(patch_central_database):
     assert target._api_key == "test_api_key_456"
 
 
-def test_no_key_recognized_azure_endpoint_auto_mints_entra(patch_central_database):
-    """With no key and a recognized Azure OpenAI endpoint, the target auto-mints
-    an Entra token provider for that endpoint."""
-
-    async def _provider() -> str:
-        return "aoai-entra-token"
-
+def test_no_key_recognized_azure_endpoint_falls_back_with_deprecation_warning(patch_central_database):
+    """Keyless Azure OpenAI configurations keep working until 1.4.0, but now announce it."""
     with (
         patch.dict(os.environ, {}, clear=True),
-        patch(
-            "pyrit.prompt_target.openai.openai_target.get_azure_openai_auth",
-            return_value=_provider,
-        ) as mock_get_auth,
+        patch("pyrit.auth.openai_auth.get_azure_openai_auth", return_value="minted-token") as mock_get_auth,
     ):
-        target = OpenAIChatTarget(
-            model_name="gpt-4",
-            endpoint="https://test.openai.azure.com/",
-        )
+        with pytest.warns(DeprecationWarning, match="1.4.0"):
+            OpenAIChatTarget(
+                model_name="gpt-4",
+                endpoint="https://test.openai.azure.com/",
+            )
 
-    mock_get_auth.assert_called_once_with("https://test.openai.azure.com/")
-    assert target._api_key is _provider
+    mock_get_auth.assert_called_once()
 
 
 def test_no_key_non_azure_endpoint_raises(patch_central_database):
     """With no key and a non-Azure endpoint, the target refuses to mint a token."""
     with patch.dict(os.environ, {}, clear=True):
-        with pytest.raises(ValueError, match="non-Azure endpoints"):
+        with pytest.raises(ValueError, match="No API key available"):
             OpenAIChatTarget(model_name="gpt-4", endpoint="https://api.openai.com/")
 
 
@@ -762,7 +874,7 @@ def test_no_key_substring_lookalike_endpoint_raises(patch_central_database):
     """A hostname merely containing 'azure' (but not a recognized suffix) must not
     trigger auto-Entra minting (loose->strict hardening)."""
     with patch.dict(os.environ, {}, clear=True):
-        with pytest.raises(ValueError, match="non-Azure endpoints"):
+        with pytest.raises(ValueError, match="No API key available"):
             OpenAIChatTarget(model_name="gpt-4", endpoint="https://evil-azure.example.com/")
 
 
@@ -869,6 +981,47 @@ def test_invalid_temperature_raises(patch_central_database):
             api_key="test",
             temperature=2.1,
         )
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("presence_penalty", [-2.1, 2.1, float("nan"), float("inf"), -float("inf")])
+def test_invalid_presence_penalty_raises(presence_penalty: float) -> None:
+    """Test that invalid presence_penalty values raise PyritException."""
+    with pytest.raises(PyritException, match="presence_penalty must be between -2 and 2"):
+        OpenAIChatTarget(
+            model_name="gpt-4",
+            endpoint="https://test.com",
+            api_key="test",
+            presence_penalty=presence_penalty,
+        )
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("frequency_penalty", [-2.1, 2.1, float("nan"), float("inf"), -float("inf")])
+def test_invalid_frequency_penalty_raises(frequency_penalty: float) -> None:
+    """Test that invalid frequency_penalty values raise PyritException."""
+    with pytest.raises(PyritException, match="frequency_penalty must be between -2 and 2"):
+        OpenAIChatTarget(
+            model_name="gpt-4",
+            endpoint="https://test.com",
+            api_key="test",
+            frequency_penalty=frequency_penalty,
+        )
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("parameter", ["presence_penalty", "frequency_penalty"])
+@pytest.mark.parametrize("value", [None, -2.0, 0.0, 2.0])
+def test_valid_generation_penalties_preserve_identifier(*, parameter: str, value: float | None) -> None:
+    target = OpenAIChatTarget(
+        model_name="gpt-4",
+        endpoint="https://test.com",
+        api_key="test",
+        presence_penalty=value if parameter == "presence_penalty" else None,
+        frequency_penalty=value if parameter == "frequency_penalty" else None,
+    )
+
+    assert target.get_identifier().params.get(parameter) == value
 
 
 def test_invalid_top_p_raises(patch_central_database):
@@ -1038,11 +1191,78 @@ def test_validate_response_success_stop(target: OpenAIChatTarget, dummy_text_mes
     assert result is None
 
 
-def test_validate_response_success_length(target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece):
-    """Test _validate_response passes for valid length response."""
+def test_validate_response_success_length(
+    target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece, caplog: pytest.LogCaptureFixture
+):
+    """Test _validate_response passes for a truncated response that still has content, and warns."""
     mock_response = create_mock_completion(content="Hello", finish_reason="length")
-    result = target._validate_response(mock_response, dummy_text_message_piece)
+    with caplog.at_level(logging.WARNING):
+        result = target._validate_response(mock_response, dummy_text_message_piece)
     assert result is None
+    assert "finish_reason='length'" in caplog.text
+
+
+def test_validate_response_length_empty_does_not_raise(
+    target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece, caplog: pytest.LogCaptureFixture
+):
+    """Test _validate_response treats a truncated-but-empty response as valid (warns, does not raise)."""
+    mock_response = create_mock_completion(content="", finish_reason="length")
+    with caplog.at_level(logging.WARNING):
+        result = target._validate_response(mock_response, dummy_text_message_piece)
+    assert result is None
+    assert "finish_reason='length'" in caplog.text
+
+
+def test_is_truncated_response_detects_length_finish_reason(target: OpenAIChatTarget):
+    """_is_truncated_response is True only when the completion stopped on the token limit."""
+    assert target._is_truncated_response(create_mock_completion(content="", finish_reason="length")) is True
+    assert target._is_truncated_response(create_mock_completion(content="hi", finish_reason="stop")) is False
+
+
+async def test_construct_message_length_empty_returns_graceful_empty_and_captures_usage(
+    target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece
+):
+    """Test construction returns a graceful empty piece with usage captured for truncated empty responses."""
+    mock_response = create_mock_completion(content="", finish_reason="length")
+    mock_response.usage = MagicMock()
+    mock_response.usage.prompt_tokens = 10
+    mock_response.usage.completion_tokens = 20
+    mock_response.usage.total_tokens = 30
+    mock_response.usage.completion_tokens_details.reasoning_tokens = 100
+
+    result = await target._construct_message_from_response_async(mock_response, dummy_text_message_piece)
+
+    assert isinstance(result, Message)
+    piece = result.message_pieces[0]
+    assert piece.original_value == ""
+    assert piece.response_error == "empty"
+    assert piece.prompt_metadata["token_usage_input_tokens"] == 10
+    assert piece.prompt_metadata["token_usage_output_tokens"] == 20
+    assert piece.prompt_metadata["token_usage_total_tokens"] == 30
+    assert piece.prompt_metadata["token_usage_reasoning_tokens"] == 100
+    assert piece.is_truncated is True
+
+
+async def test_construct_message_length_with_content_sets_truncated_metadata(
+    target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece
+):
+    """Test construction preserves partial content and marks token-limit truncation."""
+    mock_response = create_mock_completion(content="Partial answer", finish_reason="length")
+
+    result = await target._construct_message_from_response_async(mock_response, dummy_text_message_piece)
+
+    piece = result.message_pieces[0]
+    assert piece.original_value == "Partial answer"
+    assert piece.is_truncated is True
+
+
+async def test_construct_message_empty_non_truncated_raises(
+    target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece
+):
+    """Test construction raises for a genuinely empty (non-truncated) response so retries can kick in."""
+    mock_response = create_mock_completion(content="", finish_reason="stop")
+    with pytest.raises(EmptyResponseException, match="Failed to extract any response content"):
+        await target._construct_message_from_response_async(mock_response, dummy_text_message_piece)
 
 
 def test_validate_response_no_choices(target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece):
@@ -1091,6 +1311,22 @@ async def test_construct_message_from_response(target: OpenAIChatTarget, dummy_t
 
 
 # Tests for underlying_model parameter and get_identifier
+
+
+@pytest.mark.usefixtures("patch_central_database")
+def test_get_identifier_distinguishes_extra_body_parameters() -> None:
+    def build(**kwargs: Any) -> OpenAIChatTarget:
+        return OpenAIChatTarget(model_name="o4-mini", endpoint="https://mock.azure.com/", api_key="k", **kwargs)
+
+    low = build(extra_body_parameters={"reasoning_effort": "low"})
+    high = build(extra_body_parameters={"reasoning_effort": "high"})
+    alloy = build(audio_response_config=OpenAIChatAudioConfig(voice="alloy"))
+    echo = build(audio_response_config=OpenAIChatAudioConfig(voice="echo"))
+
+    assert low.get_identifier().params["extra_body_parameters"] == {"reasoning_effort": "low"}
+    assert low.get_identifier().hash != high.get_identifier().hash
+    assert alloy.get_identifier().hash != echo.get_identifier().hash
+    assert build().get_identifier().params.get("extra_body_parameters") is None
 
 
 def test_get_identifier_uses_model_name_when_no_underlying_model(patch_central_database):
@@ -2043,6 +2279,7 @@ async def test_construct_message_from_response_captures_token_usage(
     assert piece.prompt_metadata["token_usage_total_tokens"] == 30
     assert piece.prompt_metadata["token_usage_cached_tokens"] == 5
     assert piece.prompt_metadata["token_usage_reasoning_tokens"] == 7
+    assert piece.is_truncated is False
 
 
 async def test_construct_message_from_response_no_usage_no_metadata(

@@ -7,9 +7,9 @@ Attack technique registry for PyRIT.
 A registry for ``AttackTechniqueFactory`` instances that scenarios and
 initializers register and later retrieve. Like ``ConverterRegistry`` it is a
 ``Registry`` whose pre-configured instances live under the ``instances``
-property; unlike converters, its buildable class catalog is intentionally empty
-for now — the factory still owns its own construction, and the catalog is lit up
-later when the factory is decoupled into a buildable component.
+property. It uses ``AttackRegistry`` for attack classes rather than maintaining
+another class catalog. ``create_factory`` resolves basic inputs; the factory
+constructs the attack only when the scenario supplies execution inputs.
 
 Scenarios and initializers register self-describing factories (via
 ``register_from_factories``), retrieve them with ``get_factories`` /
@@ -21,19 +21,40 @@ with the scenario's objective target and scorer.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
+from functools import lru_cache, wraps
+from typing import TYPE_CHECKING, Any, ClassVar, cast
+from weakref import WeakSet
 
-from pyrit.registry.instance_registry import DefaultInstanceRegistry, InstanceRegistry
+from pydantic import ValidationError
+
+from pyrit.models import AttackIdentifier, ComponentType
+from pyrit.models.component_spec import SourceInstanceSpec
+from pyrit.registry.instance_registry import DefaultInstanceRegistry
 from pyrit.registry.registry import Registry
 from pyrit.registry.registry_metadata import RegistryMetadata
 
 if TYPE_CHECKING:
-    from pyrit.registry.tag_query import TagQuery
+    from collections.abc import Callable
+    from typing import Protocol
+
+    from pyrit.models import Parameter
+    from pyrit.models.technique_edit import TechniqueChanges
+    from pyrit.prompt_normalizer import ConverterConfiguration
     from pyrit.scenario.core.attack_technique_factory import (
         AttackTechniqueFactory,
         ScorerOverridePolicy,
     )
+    from pyrit.scenario.core.scenario_technique import ScenarioTechnique
+
+    class _CachedScenarioTechniqueClass(Protocol):
+        """A scenario enum function with the existing cache-reset interface."""
+
+        cache_clear: Callable[[], None]
+
+        def __call__(self) -> type[ScenarioTechnique]: ...
+
 
 logger = logging.getLogger(__name__)
 
@@ -54,16 +75,99 @@ def _attack_technique_factory_type() -> type[AttackTechniqueFactory]:
     return AttackTechniqueFactory
 
 
+def _validate_generated_member_collisions(
+    *,
+    class_name: str,
+    factories: list[AttackTechniqueFactory],
+    aggregate_tags: set[str],
+) -> None:
+    """
+    Validate that generated enum member names and values are unambiguous.
+
+    Args:
+        class_name (str): Name of the enum class being generated.
+        factories (list[AttackTechniqueFactory]): Technique factories that become enum members.
+        aggregate_tags (set[str]): Catalog tags that become aggregate members.
+
+    Raises:
+        ValueError: If a factory or aggregate would collide with a reserved or generated member.
+    """
+    from pyrit.scenario.core.scenario_technique import ScenarioTechnique
+
+    inherited_names = {
+        name for base in (*ScenarioTechnique.__mro__, *type(ScenarioTechnique).__mro__) for name in vars(base)
+    }
+    member_sources = {"ALL": "reserved aggregate 'all'", "DEFAULT": "reserved aggregate 'default'"}
+    value_sources = {"all": "reserved aggregate 'all'", "default": "reserved aggregate 'default'"}
+
+    def _reserve(*, member_name: str, member_value: str, source: str) -> None:
+        if existing := member_sources.get(member_name):
+            raise ValueError(
+                f"Cannot build {class_name}: {source} maps to enum member name {member_name!r}, "
+                f"already used by {existing}. Rename the tag or factory."
+            )
+        if existing := value_sources.get(member_value):
+            raise ValueError(
+                f"Cannot build {class_name}: {source} maps to enum value {member_value!r}, "
+                f"already used by {existing}. Rename the tag or factory."
+            )
+        if member_name in inherited_names:
+            raise ValueError(
+                f"Cannot build {class_name}: {source} maps to enum member name {member_name!r}, "
+                "which conflicts with an inherited ScenarioTechnique attribute. Rename the tag or factory."
+            )
+        member_sources[member_name] = source
+        value_sources[member_value] = source
+
+    for tag in sorted(aggregate_tags):
+        _reserve(member_name=tag.upper(), member_value=tag, source=f"aggregate tag {tag!r}")
+    for factory in factories:
+        _reserve(member_name=factory.name, member_value=factory.name, source=f"technique factory {factory.name!r}")
+
+
 @dataclass(frozen=True)
 class AttackTechniqueMetadata(RegistryMetadata):
-    """
-    Metadata describing a registered attack-technique class.
+    """Shared metadata type for the inherited, empty technique class catalog."""
 
-    Placeholder for the buildable catalog, which is intentionally empty until the
-    factory is decoupled into a buildable component. It carries only the common
-    ``RegistryMetadata`` fields today; technique-specific fields are added when
-    the catalog is lit up.
-    """
+
+class TechniqueInstanceRegistry(DefaultInstanceRegistry["AttackTechniqueFactory"]):
+    """Factory storage with an atomic runtime-admission path."""
+
+    def register_runtime(self, factory: AttackTechniqueFactory) -> None:
+        """
+        Check selector collisions while holding the same lock as registration.
+
+        Raises:
+            ValueError: If the name or a tag conflicts with an existing selector.
+        """
+        from pyrit.registry.components.scenario_registry import ScenarioRegistry
+
+        # Discover builders before taking the instance lock; discovery has its own catalog lock.
+        ScenarioRegistry.get_registry_singleton().get_class_names()
+        with self._lock:
+            entries = self.get_all_instances()
+            names = {entry.name.casefold(): entry.name for entry in entries}
+            tags = {tag.casefold(): tag for entry in entries for tag in entry.instance.technique_tags}
+            folded_name = factory.name.casefold()
+            if folded_name in names:
+                raise ValueError(f"Technique '{factory.name}' already exists (names are case-insensitive)")
+            if folded_name in tags:
+                raise ValueError(f"Technique name '{factory.name}' conflicts with an aggregate tag")
+            for tag in factory.technique_tags:
+                folded = tag.casefold()
+                if folded in names or folded == folded_name:
+                    raise ValueError(f"Tag '{tag}' conflicts with a technique name")
+                if folded in tags and tags[folded] != tag:
+                    raise ValueError(f"Tag '{tag}' conflicts with tag '{tags[folded]}'")
+            _validate_generated_member_collisions(
+                class_name="ScenarioTechnique",
+                factories=[factory],
+                aggregate_tags=set(factory.technique_tags) - {"all", "default"},
+            )
+            AttackTechniqueRegistry.get_registry_singleton().validate_scenario_pools(
+                {**{entry.name: entry.instance for entry in entries}, factory.name: factory}
+            )
+            self.register(factory, name=factory.name, tags=factory.technique_tags)
 
 
 class AttackTechniqueRegistry(Registry["AttackTechniqueFactory", AttackTechniqueMetadata]):
@@ -77,10 +181,23 @@ class AttackTechniqueRegistry(Registry["AttackTechniqueFactory", AttackTechnique
 
     It is a ``Registry``: pre-configured factories live under the ``instances``
     property (``register``, ``get``, ``get_all_instances``, ``get_by_tag``, …),
-    a ``DefaultInstanceRegistry``. The buildable class catalog is intentionally
-    empty for now — the factory still owns construction — so ``_discover``
-    registers no classes.
+    a ``DefaultInstanceRegistry``. Attack classes come from ``AttackRegistry``;
+    this registry has no separate class catalog.
+
+    ``cache_scenario_technique_class`` refreshes scenario selection enums when
+    registered factories change. It does not create or cache attack instances.
     """
+
+    _SCENARIO_BUILDERS: ClassVar[WeakSet[Callable[[], type[ScenarioTechnique]]]] = WeakSet()
+    _FACTORY_PREVIEW: ClassVar[ContextVar[tuple[object, dict[str, AttackTechniqueFactory]] | None]] = ContextVar(
+        "technique_factory_preview", default=None
+    )
+    _DEFERRED_EDIT_PARAMETERS = {
+        "objective_target",
+        "attack_scoring_config",
+        "attack_adversarial_config",
+        "attack_converter_config",
+    }
 
     def __init__(self, *, lazy_discovery: bool = True) -> None:
         """
@@ -95,13 +212,286 @@ class AttackTechniqueRegistry(Registry["AttackTechniqueFactory", AttackTechnique
         from pyrit.scenario.core.attack_technique_factory import ScorerOverridePolicy
 
         super().__init__(lazy_discovery=lazy_discovery)
-        self.instances: InstanceRegistry[AttackTechniqueFactory] = DefaultInstanceRegistry(
-            instance_type=_attack_technique_factory_type
-        )
+        self.instances = TechniqueInstanceRegistry(instance_type=_attack_technique_factory_type)
         self._scorer_override_policy = ScorerOverridePolicy.WARN
 
+    def create_factory(
+        self,
+        *,
+        name: str,
+        attack_type: str,
+        params: dict[str, Any] | None = None,
+        request_converters: list[str] | None = None,
+        response_converters: list[str] | None = None,
+        strict_json: bool = False,
+        **factory_kwargs: Any,
+    ) -> AttackTechniqueFactory:
+        """
+        Resolve basic registry inputs into a factory without creating an attack.
+
+        Attack types come from ``AttackRegistry``; converters and the adversarial
+        target reference existing instances. Seeds, scoring configurations, and
+        conversation configurations remain available through Python factories.
+        Strict GUI creation with request converters also selects user and assistant
+        history for replay conversion; simulation generation is unchanged.
+
+        Returns:
+            AttackTechniqueFactory: The configured deferred factory.
+
+        Raises:
+            ValueError: If the attack or its inputs are not supported.
+        """
+        from pyrit.executor.attack import AttackConverterConfig
+        from pyrit.registry.components.attack_registry import AttackRegistry
+        from pyrit.registry.resolution import resolve_constructor_args, resolve_reference_value
+        from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
+
+        registry = AttackRegistry.get_registry_singleton()
+        try:
+            attack_class = registry.get_class(attack_type)
+        except KeyError as exc:
+            raise ValueError(f"Attack type '{attack_type}' is not registered") from exc
+        params = params if params is not None else {}
+        deferred = {"objective_target", "attack_adversarial_config", "attack_scoring_config"}
+        if params.keys() & deferred:
+            raise ValueError(f"These parameters are supplied at execution: {sorted(params.keys() & deferred)}")
+        parameters = registry.get_class_metadata(attack_class).parameters
+        names = {parameter.name for parameter in parameters}
+        supplied = set(params)
+        if request_converters is not None or response_converters is not None:
+            if "attack_converter_config" in params:
+                raise ValueError("Do not combine attack_converter_config with converter name lists")
+            if "attack_converter_config" not in names:
+                raise ValueError(f"Attack '{attack_type}' does not accept converters")
+            supplied.add("attack_converter_config")
+        missing = [
+            parameter.name
+            for parameter in parameters
+            if parameter.required and parameter.name not in supplied and parameter.name not in deferred
+        ]
+        if missing:
+            raise ValueError(f"Missing required parameters for '{attack_type}': {missing}")
+        attack_args = resolve_constructor_args(
+            cls=attack_class,
+            raw_args=params,
+            identifier_type=AttackIdentifier,
+            strict_json=strict_json,
+        )
+        if request_converters is not None or response_converters is not None:
+            converter_args = self._resolve_converter_changes(
+                {
+                    "request_converters": request_converters or [],
+                    "response_converters": response_converters or [],
+                }
+            )
+            attack_args["attack_converter_config"] = AttackConverterConfig(**converter_args)
+        if "attack_adversarial_config" not in names and any(
+            factory_kwargs.get(key) is not None
+            for key in (
+                "adversarial_chat",
+                "adversarial_system_prompt",
+                "adversarial_seed_prompt",
+                "adversarial_prompt_template",
+            )
+        ):
+            raise ValueError(f"Attack '{attack_type}' does not accept adversarial factory settings")
+        if factory_kwargs.get("adversarial_chat") is not None:
+            factory_kwargs["adversarial_chat"] = resolve_reference_value(
+                component_type=ComponentType.TARGET,
+                value=factory_kwargs["adversarial_chat"],
+                owner="Technique",
+                name="adversarial_chat",
+            )
+        registry.validate_constructor_parameters(attack_class=attack_class, params=attack_args)
+        factory = AttackTechniqueFactory(
+            name=name,
+            attack_class=attack_class,
+            attack_kwargs=attack_args,
+            **factory_kwargs,
+        )
+        return self._with_replay_converter_roles(factory) if strict_json and request_converters else factory
+
+    @staticmethod
+    def get_editable_settings(factory: AttackTechniqueFactory) -> dict[str, Any]:
+        """
+        Project supported factory fields onto registered names without reconstructing source state.
+
+        Returns:
+            dict[str, Any]: Fields that can be represented losslessly through registry input.
+        """
+        from pyrit.registry.resolution import reference_name
+
+        settings = factory.get_editable_settings()
+        for key in ("adversarial_chat", "request_converters", "response_converters"):
+            if key not in settings or settings[key] is None:
+                continue
+            component_type = ComponentType.TARGET if key == "adversarial_chat" else ComponentType.CONVERTER
+            values = [settings[key]] if key == "adversarial_chat" else settings[key]
+            names = [reference_name(component_type=component_type, value=value) for value in values]
+            if None in names:
+                del settings[key]
+            else:
+                settings[key] = names[0] if key == "adversarial_chat" else names
+        return settings
+
+    @classmethod
+    def get_editable_parameters(cls, factory: AttackTechniqueFactory) -> list[Parameter]:
+        """
+        Select constructor inputs whose source values have a lossless external representation.
+
+        Returns:
+            list[Parameter]: Editable inputs; deferred and opaque source values remain untouched.
+        """
+        from pyrit.registry.resolution import project_parameter_value
+
+        values = factory.get_effective_attack_kwargs()
+        result = []
+        for parameter in cls.get_constructor_parameters(factory):
+            try:
+                project_parameter_value(parameter=parameter, value=values.get(parameter.name, parameter.default))
+            except (ValueError, TypeError, ValidationError):
+                continue
+            result.append(parameter)
+        return result
+
+    @classmethod
+    def get_constructor_parameters(cls, factory: AttackTechniqueFactory) -> list[Parameter]:
+        """
+        Describe factory-owned constructor inputs while leaving execution inputs deferred.
+
+        Returns:
+            list[Parameter]: Constructor parameters eligible for source-value projection.
+        """
+        from pyrit.registry.components.attack_registry import AttackRegistry
+
+        return [
+            parameter
+            for parameter in AttackRegistry.get_registry_singleton().get_class_metadata(factory.attack_class).parameters
+            if parameter.name not in cls._DEFERRED_EDIT_PARAMETERS
+        ]
+
+    def edit_factory(self, *, source: AttackTechniqueFactory, changes: TechniqueChanges) -> AttackTechniqueFactory:
+        """
+        Resolve a partial external edit and validate a private factory copy without registration.
+
+        Adding request converters selects both user and assistant history for replay.
+
+        Returns:
+            AttackTechniqueFactory: A validated copy retaining unedited and opaque source settings.
+
+        Raises:
+            ValueError: If a supplied field is read-only, invalid, or no longer registered.
+        """
+        from pyrit.registry.resolution import resolve_constructor_args, resolve_reference_value
+
+        supplied = changes.model_fields_set - {"params"}
+        if unsupported := supplied - self.get_editable_settings(source).keys():
+            raise ValueError(f"Technique settings are read-only: {', '.join(sorted(unsupported))}")
+        if "simulation" in supplied and changes.simulation is None:
+            raise ValueError("Simulation settings cannot be cleared")
+        if unsupported_params := changes.params.keys() - {p.name for p in self.get_editable_parameters(source)}:
+            raise ValueError(f"Technique parameters are read-only or unknown: {', '.join(sorted(unsupported_params))}")
+        settings = source.get_effective_settings()
+        settings.attack_kwargs.update(
+            resolve_constructor_args(
+                cls=source.attack_class,
+                raw_args=changes.params,
+                identifier_type=AttackIdentifier,
+                external_input=True,
+                strict_json=True,
+            )
+        )
+        for name in supplied - {"simulation", "request_converters", "response_converters"}:
+            value = getattr(changes, name)
+            if name == "adversarial_chat" and value is not None:
+                value = resolve_reference_value(
+                    component_type=ComponentType.TARGET, value=value, owner="Technique", name=name
+                )
+            setattr(settings, name, value)
+        converters = self._resolve_converter_changes(
+            {name: getattr(changes, name) for name in supplied & {"request_converters", "response_converters"}}
+        )
+        factory = source.with_settings(settings=settings, simulation=changes.simulation, converter_changes=converters)
+        return self._with_replay_converter_roles(factory) if changes.request_converters else factory
+
+    @staticmethod
+    def _with_replay_converter_roles(factory: AttackTechniqueFactory) -> AttackTechniqueFactory:
+        """
+        Apply GUI request converters to both sides of completed history before replay.
+
+        Returns:
+            AttackTechniqueFactory: A copy retaining existing history formatting and explicit role opt-ins.
+
+        Raises:
+            TypeError: If the effective history configuration is not a supported configuration.
+        """
+        from pyrit.executor.attack.component import PrependedConversationConfig
+
+        settings = factory.get_effective_attack_kwargs()
+        if "prepended_conversation_config" not in settings:
+            return factory
+        config = settings["prepended_conversation_config"] or PrependedConversationConfig()
+        if not isinstance(config, PrependedConversationConfig):
+            raise TypeError("prepended_conversation_config must be a PrependedConversationConfig")
+        roles = list(config.apply_converters_to_roles)
+        for role in ("user", "assistant"):
+            if role not in roles:
+                roles.append(role)
+        copied = factory.get_effective_settings()
+        copied.attack_kwargs["prepended_conversation_config"] = replace(config, apply_converters_to_roles=roles)
+        return factory.with_settings(settings=copied)
+
+    @staticmethod
+    def _resolve_converter_changes(
+        changes: dict[str, list[str | SourceInstanceSpec] | list[str] | None],
+    ) -> dict[str, list[ConverterConfiguration]]:
+        """
+        Resolve ordered converter names or private settings without registering new instances.
+
+        Returns:
+            dict[str, list[ConverterConfiguration]]: Ordered chains of registered converters or private copies.
+
+        Raises:
+            ValueError: If a chain is null or a name is not registered.
+        """
+        from pyrit.prompt_normalizer import ConverterConfiguration
+        from pyrit.registry.components.converter_registry import ConverterRegistry
+        from pyrit.registry.resolution import resolve_reference_value
+
+        registry = ConverterRegistry.get_registry_singleton()
+        converters = {}
+        for name, names in changes.items():
+            if names is None:
+                raise ValueError(f"Use an empty list to clear {name}")
+            chain = []
+            for value in names:
+                if isinstance(value, SourceInstanceSpec):
+                    source = registry.resolve_source(name=value.source_name, identifier_hash=value.source_hash)
+                    metadata = registry.get_registered_class_metadata(type(source).__name__)
+                    for parameter in metadata.parameters if metadata else []:
+                        if parameter.name in value.params and (parameter.is_path or parameter.is_path_or_str):
+                            raise ValueError(
+                                f"Temporary technique settings cannot replace file parameter '{parameter.name}'. "
+                                "Create a registered converter with the new file instead."
+                            )
+                    converter = registry.recreate_instance(source=source, params=value.params, external_input=True)
+                    if value.effective_hash and converter.get_identifier().hash != value.effective_hash:
+                        raise ValueError("Temporary converter configuration has changed")
+                else:
+                    converter = resolve_reference_value(
+                        component_type=ComponentType.CONVERTER, value=value, owner="Technique", name=name
+                    )
+                chain.append(converter)
+            converters[name] = ConverterConfiguration.from_converters(converters=chain)
+        return converters
+
+    @property
+    def catalog_revision(self) -> tuple[object, int]:
+        """Cache key for scenario selections, metadata, and estimates derived from registered factories."""
+        return self.instances, self.instances.revision
+
     def _discover(self) -> None:
-        """Register no classes: the factory owns construction; the catalog is lit up later."""
+        """Register no classes: attack class discovery belongs to ``AttackRegistry``."""
 
     def _metadata_class(self) -> type[AttackTechniqueMetadata]:
         """Return ``AttackTechniqueMetadata``; unused while the buildable catalog is empty."""
@@ -137,7 +527,27 @@ class AttackTechniqueRegistry(Registry["AttackTechniqueFactory", AttackTechnique
         Returns:
             dict[str, AttackTechniqueFactory]: Mapping of technique name to factory.
         """
+        preview = self._FACTORY_PREVIEW.get()
+        if preview is not None and preview[0] is self.instances:
+            return dict(preview[1])
         return {entry.name: entry.instance for entry in self.instances.get_all_instances()}
+
+    def validate_scenario_pools(self, factories: dict[str, AttackTechniqueFactory]) -> None:
+        """
+        Build affected selection catalogs against a candidate pool without changing caches or storage.
+
+        Scenario builders retain their own filtering and local-factory precedence.
+        Fixed catalogs do not use the revision-aware decorator and are not rebuilt.
+
+        Raises:
+            ValueError: If a candidate conflicts with an effective scenario catalog.
+        """
+        token = self._FACTORY_PREVIEW.set((self.instances, factories))
+        try:
+            for builder in tuple(self._SCENARIO_BUILDERS):
+                builder()
+        finally:
+            self._FACTORY_PREVIEW.reset(token)
 
     def get_factories_or_raise(self) -> dict[str, AttackTechniqueFactory]:
         """
@@ -173,100 +583,144 @@ class AttackTechniqueRegistry(Registry["AttackTechniqueFactory", AttackTechnique
         return self._scorer_override_policy
 
     @staticmethod
+    def cache_scenario_technique_class(
+        builder: Callable[[], type[ScenarioTechnique]],
+    ) -> _CachedScenarioTechniqueClass:
+        """
+        Cache a scenario's selectable technique enum until registered factories change.
+
+        Reuse the same enum class while the registry is unchanged. After registration,
+        removal, or registry reset, the next call builds a new selection enum. Existing
+        scenarios keep their old enum reference. Only the latest result is cached.
+
+        Args:
+            builder (Callable[[], type[ScenarioTechnique]]): The scenario's enum function.
+
+        Returns:
+            _CachedScenarioTechniqueClass: The cached enum function, with ``cache_clear`` for setup reset.
+        """
+
+        @lru_cache(maxsize=1)
+        def cached(revision: tuple[object, int]) -> type[ScenarioTechnique]:
+            technique_class = builder()
+            technique_class._selection_catalog = (builder, revision[0])
+            return technique_class
+
+        @wraps(builder)
+        def current() -> type[ScenarioTechnique]:
+            if AttackTechniqueRegistry._FACTORY_PREVIEW.get() is not None:
+                return builder()
+            return cached(AttackTechniqueRegistry.get_registry_singleton().catalog_revision)
+
+        result = cast("_CachedScenarioTechniqueClass", current)
+        result.cache_clear = cached.cache_clear
+        AttackTechniqueRegistry._SCENARIO_BUILDERS.add(builder)
+        return result
+
+    @staticmethod
     def build_technique_class_from_factories(
         *,
         class_name: str,
         factories: list[AttackTechniqueFactory],
-        aggregate_tags: dict[str, TagQuery],
-        available: TagQuery | None = None,
-        default: TagQuery | None = None,
-        default_technique_names: set[str] | None = None,
-    ) -> type:
+        default_tags: set[str] | None = None,
+        default_names: set[str] | None = None,
+    ) -> type[ScenarioTechnique]:
         """
         Build a ``ScenarioTechnique`` enum subclass dynamically from technique factories.
 
         Creates an enum class with:
         - An ``ALL`` aggregate member (always included).
-        - A ``DEFAULT`` aggregate member when a default selection is provided.
-        - Additional aggregate members from ``aggregate_tags`` keys.
-        - One technique member per *available* factory, with tags from the factory.
+        - A ``DEFAULT`` aggregate member when a default selection is provided and at
+            least one pool technique matches it.
+        - An aggregate member for every catalog tag present in the pool, so tags and
+            aggregates are synonymous: selecting a tag (e.g. ``core`` or a custom
+            ``airt_internal``) expands to every technique carrying it.
+        - One technique member per factory, with tags from the factory.
 
-        The three selection roles are all expressed the same way — as tag queries
-        over ``factories`` — and relate as strict subsets:
-
-        - **available** (the pool): ``available`` filters ``factories`` to the
-            techniques this scenario exposes. When ``None`` the whole ``factories``
-            list is the pool (back-compatible).
-        - **aggregates**: named ``TagQuery`` presets (e.g. ``single_turn``); each is
-            evaluated only over the pool, so every aggregate is a subset of available.
-        - **default**: what runs when the caller selects nothing. Given as a
-            ``TagQuery`` (``default``) and/or explicit ``default_technique_names``;
-            both are intersected with the pool, so ``DEFAULT`` is always a subset of
-            available.
-
-        ``default`` is deliberately **not** an intrinsic technique tag: what runs by
-        default differs per scenario. A scenario selects its default set via a query
-        or by name so the same technique can be default for one scenario and not
-        another, without a catalog-wide tag.
+        The catalog's *default* — what runs when the caller selects nothing — is defined
+        by exactly one of ``default_tags`` or ``default_names`` (or neither). Both build
+        the synthetic ``DEFAULT`` aggregate and are recorded on the class, returned by
+        ``ScenarioTechnique.default()``. When neither is given, or the chosen set matches
+        no pool technique (e.g. a custom initializer registers no ``light``-tagged
+        factory), the default falls back to ``ALL``. The default is chosen per-scenario,
+        so the same technique can be the default for one scenario and not another.
 
         Args:
             class_name (str): Name for the generated enum class.
-            factories (list[AttackTechniqueFactory]): Candidate technique factories.
-                Filtered by ``available`` to form the pool of enum members.
-            aggregate_tags (dict[str, TagQuery]): Maps aggregate member names to a
-                ``TagQuery`` that selects which pool techniques belong to the aggregate.
-                An ``ALL`` aggregate (expanding to all pool techniques) is always added.
-            available (TagQuery | None): Query selecting which of ``factories`` are
-                available for this scenario (the pool). ``None`` means all of them.
-            default (TagQuery | None): Query selecting the pool techniques that form
-                the ``DEFAULT`` aggregate. Combined (union) with
-                ``default_technique_names``.
-            default_technique_names (set[str] | None): Names of pool techniques that
-                form this scenario's ``DEFAULT`` aggregate. Combined (union) with
-                ``default``. Names not present in the pool are ignored, so a scenario
-                can list its intended default set even when some of those techniques
-                are filtered out of its pool. When the combined default selection is
-                empty, no ``DEFAULT`` aggregate is generated.
+            factories (list[AttackTechniqueFactory]): The technique factories that form
+                this scenario's pool of enum members. Callers pre-filter this list to
+                shape the pool.
+            default_tags (set[str] | None): Tags whose union defines the scenario's
+                ``DEFAULT`` aggregate — every pool technique carrying any of these tags is
+                the default (e.g. ``{"light"}``). Mutually exclusive with ``default_names``.
+            default_names (set[str] | None): Exact technique names that form the
+                scenario's ``DEFAULT`` aggregate. Names not present in the pool are
+                ignored, so a scenario can list its intended default set even when some of
+                those techniques are filtered out. Mutually exclusive with ``default_tags``.
 
         Returns:
-            type: A ``ScenarioTechnique`` subclass with the generated members.
+            type[ScenarioTechnique]: A ``ScenarioTechnique`` subclass with the generated members.
+
+        Raises:
+            ValueError: If both ``default_tags`` and ``default_names`` are provided, or if generated
+                enum member names or values collide.
         """
         from pyrit.scenario import ScenarioTechnique
 
-        # available (the pool): filter the candidate factories by the availability query.
-        pool = available.filter(factories) if available is not None else list(factories)
+        if default_tags and default_names:
+            raise ValueError("Provide at most one of default_tags or default_names, not both.")
 
-        # default: resolve from an explicit name set and/or a query over the pool. The
-        # DEFAULT aggregate exists whenever a default was requested; its membership is
-        # limited to the pool below (only pool factories are iterated), so DEFAULT is
-        # always a subset of available.
-        default_names: set[str] = set(default_technique_names or set())
-        if default is not None:
-            default_names |= {f.name for f in pool if default.matches(set(f.technique_tags))}
+        pool = list(factories)
+        pool_technique_names = {f.name for f in pool}
+        pool_tags = {tag for f in pool for tag in f.technique_tags}
 
-        all_aggregate_tag_names = {"all"} | set(aggregate_tags.keys())
+        # default: the pool techniques that form the DEFAULT aggregate, from either an
+        # explicit set of names or the union over a set of tags. Limited to the pool, so
+        # DEFAULT is always a subset of ALL. When it is empty (nothing matched) no DEFAULT
+        # aggregate is built and the catalog default falls back to ALL.
         if default_names:
+            default_member_names = {f.name for f in pool if f.name in default_names}
+        elif default_tags:
+            default_member_names = {f.name for f in pool if set(f.technique_tags) & default_tags}
+        else:
+            default_member_names = set()
+
+        # Auto-promote every catalog tag present in the pool into a selectable aggregate,
+        # so tags and aggregates are synonymous: selecting a tag expands to every technique
+        # carrying it. "all" and "default" are reserved synthetic aggregates and are never
+        # derived from tags. A tag that collides with a technique name stays a concrete
+        # technique (name selection wins).
+        reserved_aggregate_tags = {"all", "default"}
+        auto_aggregate_tags = pool_tags - reserved_aggregate_tags - pool_technique_names
+        _validate_generated_member_collisions(
+            class_name=class_name,
+            factories=pool,
+            aggregate_tags=auto_aggregate_tags,
+        )
+
+        all_aggregate_tag_names = {"all"} | auto_aggregate_tags
+        if default_member_names:
             all_aggregate_tag_names.add("default")
 
-        members: dict[str, tuple[str, set[str]]] = {}
+        members: dict[str, tuple[str, set[str], str | None]] = {}
 
         # Aggregate members first (ALL is always present)
-        members["ALL"] = ("all", {"all"})
-        if default_names:
-            members["DEFAULT"] = ("default", {"default"})
-        for agg_name in aggregate_tags:
-            members[agg_name.upper()] = (agg_name, {agg_name})
+        members["ALL"] = ("all", {"all"}, None)
+        if default_member_names:
+            members["DEFAULT"] = ("default", {"default"}, None)
+        for agg_name in sorted(auto_aggregate_tags):
+            members[agg_name.upper()] = (agg_name, {agg_name}, None)
 
-        # Technique members from the pool — assign aggregate tags based on TagQuery matching
+        # Technique members from the pool — tag DEFAULT members so the aggregate expands.
         for factory in pool:
             factory_tags = set(factory.technique_tags)
-            matched_agg_tags = {agg_name for agg_name, query in aggregate_tags.items() if query.matches(factory_tags)}
-            if factory.name in default_names:
-                matched_agg_tags.add("default")
-            members[factory.name] = (factory.name, factory_tags | matched_agg_tags)
+            if factory.name in default_member_names:
+                factory_tags = factory_tags | {"default"}
+            members[factory.name] = (factory.name, factory_tags, factory.description)
 
         # Build the enum class dynamically
-        technique_cls = ScenarioTechnique(class_name, members)
+        technique_cls = cast("type[ScenarioTechnique]", ScenarioTechnique(class_name, members))
+        technique_cls._factory_sources = {factory.name: factory for factory in pool}
 
         # Override get_aggregate_tags on the generated class
         @classmethod
@@ -275,7 +729,13 @@ class AttackTechniqueRegistry(Registry["AttackTechniqueFactory", AttackTechnique
 
         technique_cls.get_aggregate_tags = _get_aggregate_tags  # type: ignore[ty:invalid-assignment]
 
-        return technique_cls  # type: ignore[ty:invalid-return-type]
+        # Record the catalog's default only when a DEFAULT aggregate was actually built.
+        # When it wasn't, the attribute is left unset and ScenarioTechnique.default() owns
+        # the single ALL fallback — so the "no default -> ALL" rule lives in one place.
+        if default_member_names:
+            technique_cls._default_technique_value = "default"  # type: ignore[ty:unresolved-attribute]
+
+        return technique_cls
 
     def register_from_factories(
         self,

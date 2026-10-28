@@ -2,9 +2,12 @@
 # Licensed under the MIT license.
 
 import logging
-from collections.abc import MutableSequence
+from collections.abc import MutableSequence, Sequence
 from typing import Any
 
+from openai.types.chat import ChatCompletion
+
+from pyrit.common import forward_init_parameters
 from pyrit.exceptions import (
     EmptyResponseException,
     pyrit_target_retry,
@@ -21,23 +24,24 @@ from pyrit.prompt_target.common.chat_completions_message_builder import (
     build_text_chat_messages,
     is_text_only_conversation,
     should_skip_audio_piece,
+    validate_chat_tool_message,
 )
 from pyrit.prompt_target.common.chat_completions_response_parser import (
     build_response_pieces_async,
-    capture_token_usage,
     detect_response_content,
-    extract_partial_content,
-    is_content_filter_response,
     save_audio_response_async,
-    validate_chat_completion_response,
 )
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import (
+    build_empty_truncated_response,
     limit_requests_per_minute,
+    validate_frequency_penalty,
+    validate_presence_penalty,
     validate_temperature,
     validate_top_p,
 )
+from pyrit.prompt_target.openai._response_adapter import ChatCompletionsResponseAdapter
 from pyrit.prompt_target.openai.openai_chat_audio_config import OpenAIChatAudioConfig
 from pyrit.prompt_target.openai.openai_target import OpenAITarget
 
@@ -58,7 +62,6 @@ class OpenAIChatTarget(OpenAITarget):
         max_completion_tokens (int): The maximum number of tokens to be returned by the model.
             The total length of input tokens and generated tokens is limited by
             the model's context length.
-        max_tokens (int): Deprecated. Use max_completion_tokens instead
         top_p (float): The nucleus sampling probability.
         frequency_penalty (float): Number between -2.0 and 2.0. Positive values
             penalize new tokens based on their existing frequency in the text so far,
@@ -76,6 +79,7 @@ class OpenAIChatTarget(OpenAITarget):
 
     """
 
+    _SUPPORTS_TOOL_CALL_HISTORY = True
     _DEFAULT_CONFIGURATION: TargetConfiguration = TargetConfiguration(
         capabilities=TargetCapabilities(
             supports_multi_turn=True,
@@ -88,12 +92,13 @@ class OpenAIChatTarget(OpenAITarget):
             ),
         )
     )
+    _response_adapter = ChatCompletionsResponseAdapter()
 
+    @forward_init_parameters
     def __init__(
         self,
         *,
         max_completion_tokens: int | None = None,
-        max_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
         frequency_penalty: float | None = None,
@@ -106,6 +111,8 @@ class OpenAIChatTarget(OpenAITarget):
         **kwargs: Any,
     ) -> None:
         """
+        Initialize the target.
+
         Args:
             model_name (str, Optional): The name of the model.
                 If no value is provided, the OPENAI_CHAT_MODEL environment variable will be used.
@@ -122,12 +129,6 @@ class OpenAIChatTarget(OpenAITarget):
                 can be generated for a completion, including visible output tokens and
                 reasoning tokens.
                 NOTE: Specify this value when using an o1 series model.
-            max_tokens (int, Optional): The maximum number of tokens that can be
-                generated in the chat completion. This value can be used to control
-                costs for text generated via API.
-
-                This value is now deprecated in favor of `max_completion_tokens`, and IS NOT
-                COMPATIBLE with o1 series models.
             temperature (float, Optional): The temperature parameter for controlling the
                 randomness of the response.
             top_p (float, Optional): The top-p parameter for controlling the diversity of the
@@ -144,14 +145,12 @@ class OpenAIChatTarget(OpenAITarget):
             extra_body_parameters (dict, Optional): Additional parameters to be included in the request body.
             custom_configuration (TargetConfiguration, Optional): Override the default target configuration.
             **kwargs: Additional keyword arguments passed to the parent OpenAITarget class.
-            httpx_client_kwargs (dict, Optional): Additional kwargs to be passed to the ``httpx.AsyncClient()``
-                constructor. For example, to specify a 3 minute timeout: ``httpx_client_kwargs={"timeout": 180}``
+            httpx_client_kwargs (dict, Optional): Additional ``AsyncOpenAI`` constructor options.
+                For example, ``{"timeout": 180}`` sets a three-minute timeout. Custom ``http_client``
+                instances use HTTPX on SDK 2, or HTTPX2 / legacy HTTPX on SDK 3.
 
         Raises:
-            PyritException: If the temperature or top_p values are out of bounds.
-            ValueError: If the temperature is not between 0 and 2 (inclusive).
-            ValueError: If the top_p is not between 0 and 1 (inclusive).
-            ValueError: If both `max_completion_tokens` and `max_tokens` are provided.
+            PyritException: If a generation parameter is out of bounds or a penalty is non-finite.
             RateLimitException: If the target is rate-limited.
             httpx.HTTPStatusError: If the request fails with a 400 Bad Request or 429 Too Many Requests error.
             json.JSONDecodeError: If the response from the target is not valid JSON.
@@ -159,17 +158,15 @@ class OpenAIChatTarget(OpenAITarget):
         """
         super().__init__(custom_configuration=custom_configuration, **kwargs)
 
-        # Validate temperature and top_p
+        # Validate generation parameters.
         validate_temperature(temperature)
         validate_top_p(top_p)
-
-        if max_completion_tokens and max_tokens:
-            raise ValueError("Cannot provide both max_tokens and max_completion_tokens.")
+        validate_presence_penalty(presence_penalty)
+        validate_frequency_penalty(frequency_penalty)
 
         self._temperature = temperature
         self._top_p = top_p
         self._max_completion_tokens = max_completion_tokens
-        self._max_tokens = max_tokens
         self._frequency_penalty = frequency_penalty
         self._presence_penalty = presence_penalty
         self._seed = seed
@@ -183,6 +180,12 @@ class OpenAIChatTarget(OpenAITarget):
 
         self._extra_body_parameters = extra_body_parameters
 
+    def validate_tool_history(self, messages: Sequence[Message]) -> None:
+        """Check stored tool history and Chat Completions tool-message constraints."""
+        super().validate_tool_history(messages)
+        for message in messages:
+            validate_chat_tool_message(message)
+
     def _build_identifier(self) -> ComponentIdentifier:
         """
         Build the identifier with OpenAI chat-specific parameters.
@@ -195,11 +198,11 @@ class OpenAIChatTarget(OpenAITarget):
                 "temperature": self._temperature,
                 "top_p": self._top_p,
                 "max_completion_tokens": self._max_completion_tokens,
-                "max_tokens": self._max_tokens,
                 "frequency_penalty": self._frequency_penalty,
                 "presence_penalty": self._presence_penalty,
                 "seed": self._seed,
                 "n": self._n,
+                "extra_body_parameters": self._extra_body_parameters,
             },
         )
 
@@ -225,8 +228,8 @@ class OpenAIChatTarget(OpenAITarget):
             "generativelanguage.googleapis.com": "https://generativelanguage.googleapis.com/v1beta/openai",
         }
 
-    @limit_requests_per_minute
     @pyrit_target_retry
+    @limit_requests_per_minute
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Asynchronously sends a message and handles the response within a managed conversation context.
@@ -253,56 +256,6 @@ class OpenAIChatTarget(OpenAITarget):
             request=message,
         )
         return [response]
-
-    def _check_content_filter(self, response: Any) -> bool:
-        """
-        Check if a Chat Completions API response has finish_reason=content_filter.
-
-        Args:
-            response: A ChatCompletion object from the OpenAI SDK.
-
-        Returns:
-            True if content was filtered, False otherwise.
-        """
-        return is_content_filter_response(response)
-
-    def _extract_partial_content(self, response: Any) -> str | None:
-        """
-        Extract partial content from a Chat Completions response with finish_reason=content_filter.
-
-        When Azure Content Safety triggers mid-generation, the model may have produced partial
-        text in ``response.choices[0].message.content`` before being cut off.
-
-        Args:
-            response: A ChatCompletion object from the OpenAI SDK.
-
-        Returns:
-            The partial text content, or None if no content was generated.
-        """
-        return extract_partial_content(response)
-
-    def _validate_response(self, response: Any, request: MessagePiece) -> Message | None:
-        """
-        Validate a Chat Completions API response for errors.
-
-        Checks for:
-        - Missing choices
-        - Invalid finish_reason
-        - At least one valid response type (text content, audio, or tool_calls)
-
-        Args:
-            response: The ChatCompletion response from OpenAI SDK.
-            request: The original request MessagePiece.
-
-        Returns:
-            None if valid, does not return Message for content filter (handled by _check_content_filter).
-
-        Raises:
-            PyritException: For unexpected response structures or finish reasons.
-            EmptyResponseException: When the API returns an empty response.
-        """
-        validate_chat_completion_response(response=response)
-        return None
 
     def _detect_response_content(self, message: Any) -> tuple[bool, bool, bool]:
         """
@@ -347,7 +300,7 @@ class OpenAIChatTarget(OpenAITarget):
             prefer_transcript_for_history=prefer_transcript_for_history,
         )
 
-    async def _construct_message_from_response_async(self, response: Any, request: MessagePiece) -> Message:
+    async def _construct_message_from_response_async(self, response: ChatCompletion, request: MessagePiece) -> Message:
         """
         Construct a Message from a ChatCompletion response.
 
@@ -364,16 +317,30 @@ class OpenAIChatTarget(OpenAITarget):
             Message: Constructed message with one or more MessagePiece entries.
 
         Raises:
-            EmptyResponseException: If the response contains no content, audio, or tool calls.
+            EmptyResponseException: If a non-truncated response contains no content, audio, or tool
+                calls. A truncated (``finish_reason == "length"``) response with no content instead
+                yields a graceful empty piece so the run continues. Truncated responses are flagged
+                via ``MessagePiece.mark_as_truncated`` on the first piece.
         """
         audio_format = self._audio_response_config.audio_format if self._audio_response_config else "wav"
+        truncated = self._is_truncated_response(response)
         pieces = await build_response_pieces_async(response=response, request=request, audio_format=audio_format)
 
         if not pieces:
+            # A truncated (finish_reason == "length") response may legitimately produce no content;
+            # return a graceful empty piece so the run continues. Validation already raised for
+            # genuinely empty (non-truncated) responses.
+            if truncated:
+                empty_message = build_empty_truncated_response(request=request)
+                self._capture_response_metadata(response=response, pieces=empty_message.message_pieces)
+                empty_message.message_pieces[0].mark_as_truncated()
+                return empty_message
             raise EmptyResponseException(message="Failed to extract any response content.")
 
-        # Capture token usage from the API response and store in the first piece's metadata
-        capture_token_usage(pieces=pieces, response=response)
+        # Capture token usage and the stop reason from the API response into the first piece.
+        self._capture_response_metadata(response=response, pieces=pieces)
+        if truncated:
+            pieces[0].mark_as_truncated()
 
         return Message(message_pieces=pieces)
 
@@ -465,7 +432,6 @@ class OpenAIChatTarget(OpenAITarget):
         body_parameters = {
             "model": self._model_name,
             "max_completion_tokens": self._max_completion_tokens,
-            "max_tokens": self._max_tokens,
             "temperature": self._temperature,
             "top_p": self._top_p,
             "frequency_penalty": self._frequency_penalty,

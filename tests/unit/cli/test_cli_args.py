@@ -1,12 +1,52 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import logging
+from uuid import UUID
 
 import pytest
 
-from pyrit.cli._cli_args import _argparse_validator, merge_config_scenario_args
-from pyrit.setup.configuration_loader import ScenarioConfig
+from pyrit.cli._cli_args import (
+    _argparse_validator,
+    parse_list_targets_arguments,
+    parse_memory_labels,
+    parse_run_arguments,
+)
+from pyrit.models import Parameter
+
+
+def test_parse_memory_labels_warns_visibly_about_an_operation_name(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.warns(DeprecationWarning, match="--operation-id"):
+        assert parse_memory_labels('{"operation": "x", "team": "red"}') == {"operation": "x", "team": "red"}
+    assert "'operation' in --memory-labels is deprecated" in capsys.readouterr().err
+    assert parse_memory_labels('{"team": "red"}') == {"team": "red"}
+    assert capsys.readouterr().err == ""
+
+
+def test_shell_parsers_omit_unsupplied_arguments() -> None:
+    assert parse_run_arguments(args_string="test") == {"scenario_name": "test"}
+    assert parse_list_targets_arguments(args_string="") == {}
+
+
+@pytest.mark.parametrize(("value", "expected"), [("all", "all"), ("default", "default"), ("7", 7), ('""', "default")])
+def test_shell_explicit_dataset_limit(*, value: str, expected: int | str | None) -> None:
+    assert parse_run_arguments(args_string=f"test --max-dataset-size {value}") == {
+        "scenario_name": "test",
+        "max_dataset_size": expected,
+    }
+
+
+def _sp(*, name: str, description: str = "", param_type: str = "str") -> Parameter:
+    """Build a real Parameter from Summary-style kwargs (param_type as a string)."""
+    return Parameter.model_validate(
+        {
+            "name": name,
+            "description": description,
+            "default": None,
+            "type_name": param_type,
+            "choices": None,
+            "is_list": False,
+        }
+    )
 
 
 def test_argparse_validator_no_params_raises():
@@ -28,49 +68,64 @@ def test_argparse_validator_wraps_keyword_only():
     assert wrapped("hello") == "HELLO"
 
 
-class TestMergeConfigScenarioArgs:
-    """Tests for the shared CLI/shell config-args merge helper."""
+def test_parse_run_arguments_skips_scenario_params_colliding_with_builtins():
+    """
+    Scenario ``supported_parameters`` include framework common params (e.g. memory_labels)
+    whose flags match built-ins. Those must be silently dropped, not raise, so ``run`` works.
+    """
+    declared_params = [
+        _sp(name="memory_labels", description="Common framework param."),
+        _sp(name="max_concurrency", description="Common framework param.", param_type="int"),
+        _sp(name="max_turns", description="Scenario custom param.", param_type="int"),
+    ]
 
-    def test_cli_wins_over_matching_config(self):
-        """Config args apply when names match; CLI overrides per-key."""
-        config = ScenarioConfig(name="scam", args={"max_turns": 5, "mode": "fast"})
-        merged = merge_config_scenario_args(
-            config_scenario=config,
-            effective_scenario_name="scam",
-            cli_args={"max_turns": 10},
-        )
-        assert merged == {"max_turns": 10, "mode": "fast"}
+    result = parse_run_arguments(
+        args_string="airt.scam --target openai_chat --max-turns 3",
+        declared_params=declared_params,
+    )
 
-    def test_warns_and_skips_when_scenario_name_differs(self, caplog):
-        """A scenario-name mismatch drops config args and emits a warning."""
-        config = ScenarioConfig(name="scam", args={"max_turns": 5})
-        with caplog.at_level(logging.WARNING):
-            merged = merge_config_scenario_args(
-                config_scenario=config,
-                effective_scenario_name="other_scenario",
-                cli_args={},
-            )
-        assert merged == {}
-        assert "scam" in caplog.text
-        assert "other_scenario" in caplog.text
+    assert result["scenario_name"] == "airt.scam"
+    assert result["target"] == "openai_chat"
+    # The dropped common params keep their built-in result keys (not scenario__-prefixed).
+    assert result["scenario__max_turns"] == 3
+    assert "scenario__memory_labels" not in result
+    assert "scenario__max_concurrency" not in result
 
-    def test_no_warning_when_config_args_empty(self, caplog):
-        """An empty/None args block should not produce a warning even on name mismatch."""
-        config = ScenarioConfig(name="scam", args=None)
-        with caplog.at_level(logging.WARNING):
-            merged = merge_config_scenario_args(
-                config_scenario=config,
-                effective_scenario_name="other_scenario",
-                cli_args={"x": 1},
-            )
-        assert merged == {"x": 1}
-        assert caplog.text == ""
 
-    def test_none_config_returns_cli_args(self):
-        """When no scenario block is configured, the helper just passes CLI args through."""
-        merged = merge_config_scenario_args(
-            config_scenario=None,
-            effective_scenario_name="scam",
-            cli_args={"max_turns": 10},
-        )
-        assert merged == {"max_turns": 10}
+def test_parse_run_arguments_first_wins_on_scenario_vs_scenario_collision():
+    """Two scenario params normalizing to the same CLI flag: first wins, second is dropped (parity with pyrit_scan)."""
+    declared_params = [
+        _sp(name="max_turns", description="First."),
+        _sp(name="max-turns", description="Normalizes to the same flag."),
+    ]
+
+    result = parse_run_arguments(
+        args_string="airt.scam --max-turns 4",
+        declared_params=declared_params,
+    )
+
+    # The first declaration owns the flag; only one scenario__ key is produced.
+    assert result["scenario__max_turns"] == "4"
+    assert "scenario__max-turns" not in result
+
+
+def test_parse_run_arguments_operation_id() -> None:
+    result = parse_run_arguments(
+        args_string="foo --target t --operation-id 11111111-1111-4111-8111-111111111111",
+        declared_params=[_sp(name="operation_id")],
+    )
+
+    assert result["operation_id"] == UUID("11111111-1111-4111-8111-111111111111")
+    assert "scenario__operation_id" not in result
+
+
+def test_parse_run_arguments_without_operation_id() -> None:
+    result = parse_run_arguments(args_string="foo --target t")
+
+    assert "operation_id" not in result
+
+
+@pytest.mark.parametrize("value", ["not-a-uuid", ""])
+def test_parse_run_arguments_invalid_operation_id(value: str) -> None:
+    with pytest.raises(ValueError):
+        parse_run_arguments(args_string=f"foo --target t --operation-id {value}")

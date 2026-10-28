@@ -8,13 +8,12 @@ from functools import cache
 from typing import TYPE_CHECKING
 
 from pyrit.common import apply_defaults
+from pyrit.common.async_compatibility import run_legacy_sync_async
 from pyrit.common.path import SCORER_SEED_PROMPT_PATH
 from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
-from pyrit.registry.tag_query import TagQuery
-from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
+from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration, DatasetSource
 from pyrit.scenario.core.matrix_atomic_attack_builder import build_matrix_atomic_attacks
 from pyrit.scenario.core.scenario import Scenario
-from pyrit.scenario.core.scenario_technique import ScenarioTechnique
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -50,28 +49,25 @@ def _leakage_factories() -> list[AttackTechniqueFactory]:
     return get_technique_factories()
 
 
-@cache
+@AttackTechniqueRegistry.cache_scenario_technique_class
 def _build_leakage_technique() -> type[ScenarioTechnique]:
     """
     Build the Leakage technique class dynamically from core + leakage-specific factories.
 
     Combines core factories (from the registry) with leakage-unique factories
-    (``first_letter``, ``image``) to provide the full set of attack techniques.
+    (``first_letter``, ``image``). Scenario-local factories override registered
+    factories of the same name, as they do during execution.
 
     Returns:
         type[ScenarioTechnique]: The dynamically generated technique enum class.
     """
     registry = AttackTechniqueRegistry.get_registry_singleton()
-    core_factories = list(registry.get_factories_or_raise().values())
-    all_factories = core_factories + _leakage_factories()
-    return AttackTechniqueRegistry.build_technique_class_from_factories(  # type: ignore[return-value, ty:invalid-return-type]
+    factories = registry.get_factories_or_raise()
+    factories.update({factory.name: factory for factory in _leakage_factories()})
+    return AttackTechniqueRegistry.build_technique_class_from_factories(
         class_name="LeakageTechnique",
-        factories=all_factories,
-        aggregate_tags={
-            "single_turn": TagQuery.any_of("single_turn"),
-            "multi_turn": TagQuery.any_of("multi_turn"),
-        },
-        default_technique_names={"role_play_movie_script", "many_shot", "first_letter", "image"},
+        factories=list(factories.values()),
+        default_names={"role_play_movie_script", "many_shot", "first_letter", "image"},
     )
 
 
@@ -124,8 +120,9 @@ class Leakage(Scenario):
         super().__init__(
             version=self.VERSION,
             technique_class=technique_class,
-            default_technique=technique_class("default"),
-            default_dataset_config=DatasetAttackConfiguration(dataset_names=["airt_leakage"], max_dataset_size=4),
+            default_dataset_config=DatasetAttackConfiguration(
+                sources=[DatasetSource(name=name) for name in ["airt_leakage"]], max_per_dataset="all", max_total=4
+            ),
             objective_scorer=objective_scorer,
             scenario_result_id=scenario_result_id,
         )
@@ -137,7 +134,8 @@ class Leakage(Scenario):
         Passes the leakage-specific factories (``first_letter``, ``image``) as
         ``extra_factories`` — kept local to this scenario so they don't pollute the global
         registry — and delegates the technique × dataset cross-product to
-        ``build_matrix_atomic_attacks``. The base owns baseline emission.
+        ``build_matrix_atomic_attacks``, which emits the baseline when ``context.include_baseline``
+        is set (the base no longer emits one centrally).
 
         Args:
             context (ScenarioContext): The resolved runtime inputs for this run.
@@ -145,9 +143,9 @@ class Leakage(Scenario):
         Returns:
             list[AtomicAttack]: The generated atomic attacks.
         """
-        return build_matrix_atomic_attacks(
+        return await run_legacy_sync_async(
+            build_matrix_atomic_attacks,
             context=context,
             objective_scorer=self._objective_scorer,
-            technique_converters=self._technique_converters,
             extra_factories={factory.name: factory for factory in _leakage_factories()},
         )

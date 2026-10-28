@@ -1,0 +1,1186 @@
+import { act, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { FluentProvider, webLightTheme } from '@fluentui/react-components'
+
+import { convertersApi, targetsApi } from '@/services/api'
+import { UserPreferencesProvider } from '@/hooks/useUserPreferences'
+import { makeTarget } from '@/test-utils/targetFixtures'
+import type { Parameter, TargetReference } from '@/types'
+import { DEFAULT_USER_PREFERENCES, writeUserPreferences } from '@/utils/userPreferences'
+import { targetReference } from '@/utils/targetIdentity'
+
+import CreateConverterDialog from './CreateConverterDialog'
+
+jest.mock('@/services/api', () => ({
+  convertersApi: {
+    listConverterTypes: jest.fn(),
+    listConverters: jest.fn(),
+    createConverter: jest.fn(),
+    buildConverter: jest.fn(),
+  },
+  targetsApi: {
+    listTargets: jest.fn(),
+  },
+}))
+
+const mockedConvertersApi = convertersApi as jest.Mocked<typeof convertersApi>
+const mockedTargetsApi = targetsApi as jest.Mocked<typeof targetsApi>
+
+const converterTypes = {
+  items: [
+    {
+      converter_type: 'CaesarConverter',
+      supported_input_types: ['text'],
+      supported_output_types: ['text'],
+      parameters: [
+        {
+          name: 'caesar_offset',
+          type_name: 'int',
+          required: true,
+          default: null,
+          choices: null,
+          description: 'Offset for the cipher.',
+        },
+      ],
+      is_llm_based: false,
+      description: 'Applies a Caesar cipher.',
+    },
+  ],
+}
+
+const wordSelectionParameter: Parameter = {
+  name: 'word_selection_strategy',
+  type_name: 'WordSelectionStrategy',
+  required: false,
+  default: null,
+  variants: {
+    all: [],
+    random: [
+      { name: 'proportion', type_name: 'float', required: true, default: null },
+      { name: 'seed', type_name: 'int', required: false, default: null },
+    ],
+    indices: [
+      { name: 'indices', type_name: 'list[int]', is_list: true, required: true },
+    ],
+    keywords: [
+      { name: 'keywords', type_name: 'list[str]', is_list: true, required: true, default: null },
+      { name: 'case_sensitive', type_name: 'bool', required: false, default: 'True' },
+    ],
+    content: [
+      { name: 'max_words', type_name: 'int', required: false, default: '2' },
+      { name: 'skip_first', type_name: 'int', required: false, default: '1' },
+      { name: 'min_word_length', type_name: 'int', required: false, default: '3' },
+      { name: 'stopwords', type_name: 'list[str]', is_list: true, required: false, default: null },
+      { name: 'candidate_words', type_name: 'list[str]', is_list: true, required: false, default: null },
+    ],
+  },
+}
+
+function mockConverterParameters(parameters: Parameter[], converterType = 'TextConverter') {
+  mockedConvertersApi.listConverterTypes.mockResolvedValue({
+    items: [{ ...converterTypes.items[0], converter_type: converterType, parameters }],
+  })
+}
+
+async function selectConverterType(converterType: string) {
+  const user = userEvent.setup()
+  await user.click(await screen.findByRole('combobox', { name: /^converter type$/i }))
+  await user.click(screen.getByTestId(`converter-type-option-${converterType}`))
+}
+
+function dialogTree(
+  props: Partial<React.ComponentProps<typeof CreateConverterDialog>> = {},
+) {
+  return (
+    <FluentProvider theme={webLightTheme}>
+      <UserPreferencesProvider accountKey="local">
+        <CreateConverterDialog
+          open
+          onClose={jest.fn()}
+          onCreated={jest.fn()}
+          {...props}
+        />
+      </UserPreferencesProvider>
+    </FluentProvider>
+  )
+}
+
+function renderDialog(
+  props: Partial<React.ComponentProps<typeof CreateConverterDialog>> = {},
+) {
+  return render(dialogTree(props))
+}
+
+async function submitCaesarConverter(user: ReturnType<typeof userEvent.setup>) {
+  await selectConverterType('CaesarConverter')
+  await user.type(screen.getByLabelText(/caesar_offset/i), '5')
+  await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+}
+
+describe('CreateConverterDialog', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    window.localStorage.clear()
+    mockedConvertersApi.listConverterTypes.mockResolvedValue(converterTypes)
+    mockedConvertersApi.listConverters.mockResolvedValue({ items: [] })
+    mockedTargetsApi.listTargets.mockResolvedValue({
+      items: [],
+      pagination: { limit: 200, has_more: false },
+    })
+    mockedConvertersApi.createConverter.mockResolvedValue({
+      converter_id: 'created',
+      identifier: {
+        class_name: 'TextConverter',
+        class_module: 'pyrit.converter',
+        hash: 'converter-hash',
+        pyrit_version: '0.0.0',
+      },
+    })
+  })
+
+  afterEach(() => {
+    jest.restoreAllMocks()
+  })
+
+  it('builds private stage settings without changing or registering the source', async () => {
+    const user = userEvent.setup()
+    const onTemporary = jest.fn()
+    const converter = {
+      converter_id: 'source',
+      identifier: {
+        class_name: 'CaesarConverter', class_module: 'pyrit.converter',
+        pyrit_version: 'test', hash: 'source-hash', caesar_offset: 1,
+      },
+    }
+    mockedConvertersApi.buildConverter.mockResolvedValue({
+      identifier: { ...converter.identifier, hash: 'private-hash', caesar_offset: 3 },
+    })
+    renderDialog({ editing: { converter }, onTemporary })
+    const offset = await screen.findByLabelText(/caesar_offset/i)
+    expect(offset).toHaveValue('1')
+    expect(screen.queryByLabelText(/registry name/i)).not.toBeInTheDocument()
+    await user.clear(offset)
+    await user.type(offset, '3')
+    await user.click(screen.getByRole('button', { name: 'Apply Settings' }))
+    await waitFor(() => expect(onTemporary).toHaveBeenCalledTimes(1))
+    expect(mockedConvertersApi.buildConverter).toHaveBeenCalledWith('CaesarConverter', {
+      source_name: 'source', source_hash: 'source-hash', params: { caesar_offset: 3 },
+    })
+    expect(mockedConvertersApi.createConverter).not.toHaveBeenCalled()
+    expect(converter.identifier.caesar_offset).toBe(1)
+    expect(onTemporary.mock.calls[0][1].hash).toBe('private-hash')
+  })
+
+  it('loads converter classes from registry type metadata', async () => {
+    const user = userEvent.setup()
+    renderDialog()
+
+    await user.click(await screen.findByRole('combobox', { name: /^converter type$/i }))
+    expect(screen.getByTestId('converter-type-option-CaesarConverter')).toHaveTextContent(
+      'Applies a Caesar cipher.',
+    )
+    expect(screen.getByRole('group', { name: 'Text to Text' })).toBeInTheDocument()
+    expect(mockedConvertersApi.listConverterTypes).toHaveBeenCalledTimes(1)
+  })
+
+  it('should clear a prior structured override without clearing untouched settings', async () => {
+    const user = userEvent.setup()
+    mockConverterParameters([wordSelectionParameter, {
+      name: 'prefix', type_name: 'str', required: false,
+    }])
+    const converter = {
+      converter_id: 'source',
+      identifier: {
+        class_name: 'TextConverter', class_module: 'pyrit.converter',
+        pyrit_version: 'test', hash: 'source-hash',
+      },
+    }
+    const params = {
+      word_selection_strategy: { type: 'random', parameters: { proportion: 0.3, seed: 42 } },
+      prefix: 'Keep this override',
+    }
+    const onTemporary = jest.fn()
+    mockedConvertersApi.buildConverter.mockResolvedValue({ identifier: converter.identifier })
+    renderDialog({
+      editing: { converter, spec: { source_name: 'source', source_hash: 'source-hash', params } },
+      onTemporary,
+    })
+    const strategy = await screen.findByRole('combobox', { name: 'word_selection_strategy' })
+    expect(strategy).toHaveValue('random')
+    await user.selectOptions(strategy, '')
+    await user.click(screen.getByRole('button', { name: 'Apply Settings' }))
+    await waitFor(() => expect(onTemporary).toHaveBeenCalledTimes(1))
+    expect(mockedConvertersApi.buildConverter).toHaveBeenCalledWith('TextConverter', {
+      source_name: 'source', source_hash: 'source-hash', params: { prefix: 'Keep this override' },
+    })
+    expect(params.word_selection_strategy.type).toBe('random')
+    expect(mockedConvertersApi.createConverter).not.toHaveBeenCalled()
+  })
+
+  it('should never register settings when the temporary apply handler is missing', async () => {
+    const user = userEvent.setup()
+    renderDialog({
+      editing: {
+        converter: {
+          converter_id: 'source',
+          identifier: {
+            class_name: 'CaesarConverter', class_module: 'pyrit.converter',
+            pyrit_version: 'test', hash: 'source-hash', caesar_offset: 1,
+          },
+        },
+      },
+    })
+    await screen.findByLabelText(/caesar_offset/i)
+    await user.click(screen.getByRole('button', { name: 'Apply Settings' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/need an apply handler/i)
+    expect(mockedConvertersApi.createConverter).not.toHaveBeenCalled()
+    expect(mockedConvertersApi.buildConverter).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])(
+    'should apply an upload only to its original settings dialog (closed: %s)',
+    async (closed) => {
+      const user = userEvent.setup()
+      mockConverterParameters([
+        { name: 'source', type_name: 'Path', required: true },
+      ], 'PathConverter')
+      const converter = {
+        converter_id: 'source',
+        identifier: {
+          class_name: 'PathConverter', class_module: 'pyrit.converter',
+          pyrit_version: 'test', hash: 'source-hash', source: 'original.txt',
+        },
+      }
+      const editing = { converter }
+      const onTemporary = jest.fn()
+      mockedConvertersApi.buildConverter.mockResolvedValue({ identifier: converter.identifier })
+      const click = jest.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => undefined)
+      const read = jest.spyOn(FileReader.prototype, 'readAsDataURL').mockImplementation(() => undefined)
+      const { rerender } = renderDialog({ editing, onTemporary })
+      await screen.findByLabelText('source *')
+      await user.click(screen.getByRole('button', { name: 'Upload' }))
+      const fileInput = click.mock.contexts[0]
+      if (!(fileInput instanceof HTMLInputElement)) throw new Error('File picker did not open')
+      screen.getByRole('dialog').appendChild(fileInput)
+      await user.upload(fileInput, new File(['uploaded'], 'input.txt', { type: 'text/plain' }))
+      fileInput.remove()
+      const reader = read.mock.contexts[0]
+      if (!(reader instanceof FileReader)) throw new Error('File read did not start')
+      if (closed) {
+        rerender(dialogTree({ open: false, editing, onTemporary }))
+        rerender(dialogTree({ open: true, editing, onTemporary }))
+        await screen.findByLabelText('source *')
+      }
+      const upload = 'data:text/plain;base64,dXBsb2FkZWQ='
+      act(() => {
+        Object.defineProperty(reader, 'result', { value: upload })
+        reader.dispatchEvent(new ProgressEvent('load'))
+      })
+      expect(screen.getByLabelText('source *')).toHaveValue(closed ? 'original.txt' : upload)
+      await user.click(screen.getByRole('button', { name: 'Apply Settings' }))
+      await waitFor(() => expect(onTemporary).toHaveBeenCalledTimes(1))
+      expect(mockedConvertersApi.buildConverter).toHaveBeenCalledWith('PathConverter', {
+        source_name: 'source', source_hash: 'source-hash', params: closed ? {} : { source: upload },
+      })
+      expect(mockedConvertersApi.createConverter).not.toHaveBeenCalled()
+    },
+  )
+
+  it('hides converter types with required parameters the form cannot configure', async () => {
+    mockedConvertersApi.listConverterTypes.mockResolvedValue({
+      items: [
+        converterTypes.items[0],
+        {
+          ...converterTypes.items[0],
+          converter_type: 'TokenBijectionConverter',
+          parameters: [{
+            name: 'tokenizer',
+            type_name: '_TokenizerWithVocab',
+            required: true,
+            default: null,
+          }],
+        },
+        {
+          ...converterTypes.items[0],
+          converter_type: 'TextJailbreakConverter',
+          parameters: [{
+            name: 'jailbreak_template',
+            type_name: 'TextJailBreak',
+            required: true,
+            default: null,
+          }],
+        },
+        {
+          ...converterTypes.items[0],
+          converter_type: 'SelectiveTextConverter',
+          parameters: [{
+            name: 'selection_strategy',
+            type_name: 'TextSelectionStrategy',
+            required: true,
+            default: null,
+          }],
+        },
+      ],
+    })
+    const user = userEvent.setup()
+    renderDialog()
+
+    await user.click(await screen.findByRole('combobox', { name: /^converter type$/i }))
+
+    expect(screen.getByTestId('converter-type-option-CaesarConverter')).toBeInTheDocument()
+    expect(screen.queryByTestId('converter-type-option-TokenBijectionConverter')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('converter-type-option-TextJailbreakConverter')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('converter-type-option-SelectiveTextConverter')).not.toBeInTheDocument()
+  })
+
+  it('keeps converter types with optional unsupported parameters', async () => {
+    mockConverterParameters([{
+      name: 'runtime_dependency',
+      type_name: 'RuntimeDependency',
+      required: false,
+      default: null,
+    }])
+    const user = userEvent.setup()
+    renderDialog()
+
+    await user.click(await screen.findByRole('combobox', { name: /^converter type$/i }))
+
+    expect(screen.getByTestId('converter-type-option-TextConverter')).toBeInTheDocument()
+  })
+
+  it('prefills an editable registry name from the selected type', async () => {
+    const user = userEvent.setup()
+    renderDialog()
+    await selectConverterType('CaesarConverter')
+
+    const nameInput = screen.getByLabelText(/registry name/i)
+    expect(nameInput).toHaveValue('CaesarConverter')
+    await user.clear(nameInput)
+    await user.type(nameInput, 'caesar-custom')
+    expect(nameInput).toHaveValue('caesar-custom')
+  })
+
+  it('requires constructor parameters before creating', async () => {
+    const user = userEvent.setup()
+    renderDialog()
+    await selectConverterType('CaesarConverter')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+
+    expect(screen.getByText('Required')).toBeInTheDocument()
+    expect(mockedConvertersApi.createConverter).not.toHaveBeenCalled()
+  })
+
+  it('offers upload or server path input for every Path parameter', async () => {
+    mockedConvertersApi.listConverterTypes.mockResolvedValue({
+      items: [{
+        converter_type: 'PathConverter',
+        supported_input_types: ['text'],
+        supported_output_types: ['text'],
+        parameters: [{
+          name: 'source',
+          type_name: 'Path',
+          required: true,
+          default: null,
+          choices: null,
+          description: 'Input asset.',
+        }],
+        is_llm_based: false,
+        description: 'Uses an input asset.',
+      }],
+    })
+    renderDialog()
+
+    await selectConverterType('PathConverter')
+
+    expect(screen.getByLabelText('source *')).toHaveAttribute(
+      'placeholder',
+      'Upload a file or enter a server path',
+    )
+    expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument()
+  })
+
+  it('creates a named converter through the registry API', async () => {
+    const onCreated = jest.fn()
+    mockedConvertersApi.createConverter.mockResolvedValue({
+      converter_id: 'caesar-custom',
+      identifier: {
+        class_name: 'CaesarConverter',
+        class_module: 'pyrit.converter',
+        hash: 'caesar-hash',
+        pyrit_version: '0.0.0',
+      },
+    })
+    const user = userEvent.setup()
+    renderDialog({ onCreated })
+    await selectConverterType('CaesarConverter')
+    const nameInput = screen.getByLabelText(/registry name/i)
+    await user.clear(nameInput)
+    await user.type(nameInput, 'caesar-custom')
+    await user.type(screen.getByLabelText(/caesar_offset/i), '5')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'caesar-custom',
+      type: 'CaesarConverter',
+      params: { caesar_offset: 5 },
+    })
+    expect(onCreated).toHaveBeenCalledWith('caesar-custom', true)
+  })
+
+  it.each([
+    ['ImageOverlayConverter', 'base_image'],
+    ['AddImageVideoConverter', 'video_path'],
+  ])('should accept a URL or upload for %s.%s', async (converterType, parameterName) => {
+    const user = userEvent.setup()
+    mockConverterParameters([{
+      name: parameterName, type_name: 'Path | str', required: true, default: null,
+    }], converterType)
+    renderDialog()
+    await selectConverterType(converterType)
+    const input = screen.getByRole('textbox', { name: `${parameterName} *` })
+    expect(input).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Upload' })).toBeEnabled()
+    const url = 'https://example.blob.core.windows.net/assets/input'
+    await user.type(input, url)
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: converterType, type: converterType, params: { [parameterName]: url },
+    })
+  })
+
+  it.each(['str | list[str]', 'list[str] | str', 'dict[str, list[int | float]] | str'])(
+    'should create SearchReplaceConverter with a string replacement for %s',
+    async (typeName) => {
+      const user = userEvent.setup()
+      mockConverterParameters([
+        { name: 'pattern', type_name: 'str', required: true },
+        { name: 'replace', type_name: typeName, required: true },
+        { name: 'regex_flags', type_name: 'int', required: false, default: '0' },
+      ], 'SearchReplaceConverter')
+      renderDialog()
+      await selectConverterType('SearchReplaceConverter')
+
+      const replacement = screen.getByRole('textbox', { name: 'replace *' })
+      expect(replacement).toBeEnabled()
+      await user.type(screen.getByRole('textbox', { name: 'pattern *' }), 'hello')
+      await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+      expect(mockedConvertersApi.createConverter).not.toHaveBeenCalled()
+      expect(screen.getByText('Required')).toBeInTheDocument()
+
+      await user.type(replacement, 'world')
+      await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+      expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+        name: 'SearchReplaceConverter',
+        type: 'SearchReplaceConverter',
+        params: { pattern: 'hello', replace: 'world', regex_flags: 0 },
+      })
+    },
+  )
+
+  const adversarialTarget = makeTarget({
+    target_registry_name: 'adversarial_chat',
+    capabilities: { supports_multi_turn: true },
+  })
+  const rewriteTarget = makeTarget({
+    target_registry_name: 'rewrite-target',
+    capabilities: { supports_multi_turn: true },
+  })
+  const targetParameter: Parameter = {
+    name: 'converter_target',
+    type_name: 'PromptTarget',
+    required: true,
+    default: null,
+    reference_type: 'target',
+  }
+
+  function mockTargetConverter(defaultTarget: TargetReference | null = null): void {
+    mockConverterParameters([targetParameter], 'PersuasionConverter')
+    mockedTargetsApi.listTargets.mockResolvedValue({
+      items: [adversarialTarget, rewriteTarget],
+      pagination: { limit: 200, has_more: false },
+    })
+    writeUserPreferences('local', {
+      ...DEFAULT_USER_PREFERENCES,
+      targets: { objective: null, adversarial: defaultTarget },
+    })
+  }
+
+  it.each([
+    ['environment', null, 'adversarial_chat'],
+    ['saved', targetReference(rewriteTarget), 'rewrite-target'],
+  ])('should preselect and submit the %s adversarial default', async (
+    _source: string,
+    defaultTarget: TargetReference | null,
+    expectedName: string,
+  ) => {
+    const user = userEvent.setup()
+    mockTargetConverter(defaultTarget)
+    renderDialog()
+
+    await selectConverterType('PersuasionConverter')
+    expect(screen.getByRole('combobox', { name: /converter_target/i })).toHaveValue(expectedName)
+    expect(screen.getByText(/^converter_target is the target used by the converter/)).toBeInTheDocument()
+    expect(screen.getByRole('option', {
+      name: new RegExp(`^${expectedName} .*\\(default\\)$`), selected: true,
+    })).toBeInTheDocument()
+    expect(screen.getAllByRole('option', { name: /\(default\)$/ })).toHaveLength(1)
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'PersuasionConverter',
+      type: 'PersuasionConverter',
+      params: { converter_target: expectedName },
+    })
+  })
+
+  it.each([false, true])('should preserve the source target when editing temporary settings (nested=%s)', async (nested: boolean) => {
+    const user = userEvent.setup()
+    mockTargetConverter()
+    const converter = {
+      converter_id: 'source-rewriter',
+      identifier: {
+        class_name: 'PersuasionConverter', class_module: 'pyrit.converter',
+        pyrit_version: 'test', hash: 'source-hash',
+        converter_target: nested ? rewriteTarget.identifier : rewriteTarget.target_registry_name,
+      },
+    }
+    const onTemporary = jest.fn()
+    mockedConvertersApi.buildConverter.mockResolvedValue({ identifier: converter.identifier })
+    renderDialog({ editing: { converter }, onTemporary })
+
+    expect(await screen.findByRole('combobox', { name: /converter_target/i })).toHaveValue('rewrite-target')
+    await user.click(screen.getByRole('button', { name: 'Apply Settings' }))
+
+    await waitFor(() => expect(onTemporary).toHaveBeenCalledTimes(1))
+    expect(mockedConvertersApi.buildConverter).toHaveBeenCalledWith('PersuasionConverter', {
+      source_name: 'source-rewriter', source_hash: 'source-hash', params: {},
+    })
+    expect(mockedConvertersApi.createConverter).not.toHaveBeenCalled()
+    expect(converter.identifier.converter_target).toEqual(nested ? rewriteTarget.identifier : 'rewrite-target')
+  })
+
+  it.each([
+    ['missing', undefined, null, 'adversarial_chat'],
+    ['null', null, null, 'adversarial_chat'],
+    ['empty', '', null, 'adversarial_chat'],
+    ['saved default', undefined, targetReference(rewriteTarget), 'rewrite-target'],
+  ])('should use the default adversarial target when editing a %s target', async (
+    _case: string, sourceTarget: unknown, defaultTarget: TargetReference | null, expected: string,
+  ) => {
+    const user = userEvent.setup()
+    mockTargetConverter(defaultTarget)
+    const converter = { converter_id: 'source-rewriter', identifier: {
+      class_name: 'PersuasionConverter', class_module: 'pyrit.converter', pyrit_version: 'test',
+      hash: 'source-hash', converter_target: sourceTarget,
+    } }
+    const onTemporary = jest.fn()
+    mockedConvertersApi.buildConverter.mockResolvedValue({ identifier: converter.identifier })
+    renderDialog({ editing: { converter }, onTemporary })
+    expect(await screen.findByRole('combobox', { name: /converter_target/i })).toHaveValue(expected)
+    await user.click(screen.getByRole('button', { name: 'Apply Settings' }))
+    await waitFor(() => expect(onTemporary).toHaveBeenCalledTimes(1))
+    expect(mockedConvertersApi.buildConverter).toHaveBeenCalledWith('PersuasionConverter', {
+      source_name: 'source-rewriter', source_hash: 'source-hash', params: { converter_target: expected },
+    })
+    expect(converter.identifier.converter_target).toBe(sourceTarget)
+  })
+
+  it('should prefill identifier settings and keep applied temporary overrides', async () => {
+    const user = userEvent.setup()
+    mockTargetConverter()
+    mockConverterParameters([
+      targetParameter,
+      { name: 'language', type_name: 'str', required: true },
+      { name: 'prompt_template', type_name: 'str', required: false, multiline: true },
+    ], 'TranslationConverter')
+    const converter = {
+      converter_id: 'source-translation',
+      identifier: {
+        class_name: 'TranslationConverter', class_module: 'pyrit.converter',
+        pyrit_version: 'test', hash: 'source-hash', language: 'French',
+        converter_target: rewriteTarget.identifier,
+      },
+      parameters: [{
+        name: 'prompt_template', type_name: 'str', required: false, multiline: true,
+        default: 'Translate the user message to {{ language }}.',
+      }],
+    }
+    const onTemporary = jest.fn()
+    mockedConvertersApi.buildConverter.mockResolvedValue({ identifier: converter.identifier })
+    renderDialog({
+      editing: {
+        converter, spec: { source_name: converter.converter_id, source_hash: 'source-hash', params: { language: 'Spanish' } },
+      },
+      onTemporary,
+    })
+    expect(await screen.findByRole('combobox', { name: /converter_target/i })).toHaveValue('rewrite-target')
+    expect(screen.getByLabelText(/language/i)).toHaveValue('Spanish')
+    expect(screen.getByLabelText(/prompt_template/i)).toHaveValue('Translate the user message to {{ language }}.')
+    await user.click(screen.getByRole('button', { name: 'Apply Settings' }))
+    await waitFor(() => expect(onTemporary).toHaveBeenCalledTimes(1))
+    expect(mockedConvertersApi.buildConverter).toHaveBeenCalledWith('TranslationConverter', {
+      source_name: 'source-translation', source_hash: 'source-hash', params: { language: 'Spanish' },
+    })
+  })
+
+  it('should keep technique file settings read-only and direct users to create a converter', async () => {
+    mockConverterParameters([{ name: 'img_to_add', type_name: 'Path', required: true }], 'AddImageTextConverter')
+    renderDialog({
+      allowUploads: false,
+      editing: { converter: {
+        converter_id: 'image', identifier: { class_name: 'AddImageTextConverter', hash: 'source' },
+      } },
+      onTemporary: jest.fn(),
+    })
+    expect(await screen.findByLabelText(/img_to_add/i)).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Upload' })).toBeDisabled()
+    expect(screen.getByText('To change this file, create a registered converter with the new upload.')).toBeInTheDocument()
+  })
+
+  it('should load a prompt default into the shared multiline editor before editing', async () => {
+    const user = userEvent.setup()
+    mockConverterParameters([{
+      name: 'system_prompt', type_name: 'str', required: false, multiline: true,
+      default: 'Default instructions\nUse {{ objective }}.',
+    }], 'RolePlayToolCallConverter')
+    renderDialog()
+    await selectConverterType('RolePlayToolCallConverter')
+    const prompt = screen.getByRole('textbox', { name: 'system_prompt' })
+    expect(prompt.tagName).toBe('TEXTAREA')
+    expect(prompt).toHaveValue('Default instructions\nUse {{ objective }}.')
+    await user.clear(prompt)
+    await user.click(prompt)
+    await user.paste('Edited instructions\nUse {{ objective }}.')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    await waitFor(() => expect(mockedConvertersApi.createConverter).toHaveBeenCalled())
+    expect(mockedConvertersApi.createConverter.mock.calls[0][0].params).toEqual({
+      system_prompt: 'Edited instructions\nUse {{ objective }}.',
+    })
+  })
+
+  it('should allow a different target or an empty selection', async () => {
+    const user = userEvent.setup()
+    mockTargetConverter()
+    renderDialog()
+    await selectConverterType('PersuasionConverter')
+
+    const targetSelect = screen.getByRole('combobox', { name: /converter_target/i })
+    await user.selectOptions(targetSelect, '')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(screen.getByText('Required')).toBeInTheDocument()
+    expect(mockedConvertersApi.createConverter).not.toHaveBeenCalled()
+
+    await user.selectOptions(targetSelect, 'rewrite-target')
+    expect(screen.getByRole('option', {
+      name: /^adversarial_chat .*\(default\)$/, selected: false,
+    })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /^rewrite-target / })).not.toHaveTextContent('(default)')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'PersuasionConverter',
+      type: 'PersuasionConverter',
+      params: { converter_target: 'rewrite-target' },
+    })
+  })
+
+  it('should default each target parameter without changing other references or defaults', async () => {
+    mockTargetConverter()
+    mockConverterParameters([
+      targetParameter,
+      { ...targetParameter, name: 'secondary_target', required: false },
+      { name: 'converter', type_name: 'PromptConverter', reference_type: 'converter', required: false },
+      { name: 'temperature', type_name: 'float', required: false, default: '0.5' },
+    ], 'PersuasionConverter')
+    renderDialog()
+    await selectConverterType('PersuasionConverter')
+
+    expect(screen.getByRole('combobox', { name: /converter_target/i })).toHaveValue('adversarial_chat')
+    expect(screen.getByRole('combobox', { name: /secondary_target/i })).toHaveValue('adversarial_chat')
+    expect(screen.getByRole('combobox', { name: /^converter$/i })).toHaveValue('')
+    expect(screen.getByRole('textbox', { name: /temperature/i })).toHaveValue('0.5')
+  })
+
+  it.each([
+    { registryName: 'missing', identifierHash: 'missing-hash' },
+    { registryName: rewriteTarget.target_registry_name, identifierHash: 'changed-hash' },
+  ])('should leave an unavailable saved default unselected (%s)', async (
+    defaultTarget: TargetReference,
+  ) => {
+    mockTargetConverter(defaultTarget)
+    renderDialog()
+    await selectConverterType('PersuasionConverter')
+
+    expect(screen.getByRole('combobox', { name: /converter_target/i })).toHaveValue('')
+    expect(screen.queryByRole('option', { name: /\(default\)$/ })).not.toBeInTheDocument()
+  })
+
+  it('should submit the catalog font size as a number', async () => {
+    const user = userEvent.setup()
+    mockConverterParameters([
+      { name: 'img_to_add', type_name: 'Path', is_list: false, choices: null, default: null, required: true },
+      { name: 'font_name', type_name: 'Path', is_list: false, choices: null, default: null, required: false },
+      { name: 'font_size', type_name: 'int', is_list: false, choices: null, default: '15', required: false },
+      { name: 'rotation', type_name: 'float', is_list: false, choices: null, default: '0.0', required: false },
+      { name: 'center_text', type_name: 'bool', is_list: false, choices: null, default: 'False', required: false },
+    ], 'AddImageTextConverter')
+    renderDialog()
+    await selectConverterType('AddImageTextConverter')
+
+    await user.type(screen.getByRole('textbox', { name: 'img_to_add *' }), 'data:image/png;base64,iVBORw0K')
+    const fontSize = screen.getByRole('textbox', { name: 'font_size' })
+    expect(fontSize).toHaveValue('15')
+    await user.clear(fontSize)
+    await user.type(fontSize, 'large')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(screen.getByText('font_size must be a number.')).toBeInTheDocument()
+    expect(mockedConvertersApi.createConverter).not.toHaveBeenCalled()
+
+    await user.clear(fontSize)
+    await user.type(fontSize, '24')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'AddImageTextConverter',
+      type: 'AddImageTextConverter',
+      params: { img_to_add: 'data:image/png;base64,iVBORw0K', font_size: 24, rotation: 0 },
+    })
+  })
+
+  it('should submit the catalog SATA word lists as arrays', async () => {
+    const user = userEvent.setup()
+    mockConverterParameters([
+      { name: 'mask_token', type_name: 'str', is_list: false, choices: null, default: '[MASK]', required: false },
+      { ...wordSelectionParameter, name: 'selection_strategy' },
+      { name: 'num_masks', type_name: 'int', is_list: false, choices: null, default: null, required: false },
+      { name: 'stopwords', type_name: 'list[str]', is_list: true, choices: null, default: null, required: false },
+      {
+        name: 'candidate_words', type_name: 'list[str]', is_list: true, choices: null, default: null, required: false,
+      },
+    ], 'SATAMaskingConverter')
+    renderDialog()
+    await selectConverterType('SATAMaskingConverter')
+
+    await user.type(screen.getByRole('textbox', { name: 'stopwords' }), 'the, a')
+    await user.type(screen.getByRole('textbox', { name: 'candidate_words' }), 'bomb')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'SATAMaskingConverter',
+      type: 'SATAMaskingConverter',
+      params: { mask_token: '[MASK]', stopwords: ['the', 'a'], candidate_words: ['bomb'] },
+    })
+  })
+
+  it('should send text values exactly as entered', async () => {
+    const user = userEvent.setup()
+    mockConverterParameters([
+      { name: 'pattern', type_name: 'str', required: true },
+      { name: 'replace', type_name: 'str', required: true },
+    ], 'SearchReplaceConverter')
+    renderDialog()
+    await selectConverterType('SearchReplaceConverter')
+
+    await user.type(screen.getByRole('textbox', { name: 'pattern *' }), 'cat')
+    await user.type(screen.getByRole('textbox', { name: 'replace *' }), '  dog  ')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'SearchReplaceConverter',
+      type: 'SearchReplaceConverter',
+      params: { pattern: 'cat', replace: '  dog  ' },
+    })
+  })
+
+  it('selects a registered target for a target reference parameter', async () => {
+    mockedConvertersApi.listConverterTypes.mockResolvedValue({
+      items: [
+        {
+          converter_type: 'PersuasionConverter',
+          supported_input_types: ['text'],
+          supported_output_types: ['text'],
+          parameters: [
+            {
+              name: 'converter_target',
+              type_name: 'PromptTarget',
+              required: true,
+              default: null,
+              choices: null,
+              reference_type: 'target',
+              description: 'The target used to rewrite prompts.',
+            },
+          ],
+          is_llm_based: true,
+          description: 'Rewrites prompts.',
+        },
+      ],
+    })
+    mockedTargetsApi.listTargets.mockResolvedValue({
+      items: [
+        {
+          target_registry_name: 'rewrite-target',
+          identifier: {
+            class_name: 'OpenAIChatTarget',
+            class_module: 'pyrit.prompt_target',
+            hash: 'target-hash',
+            pyrit_version: '0.0.0',
+          },
+        },
+      ],
+      pagination: { limit: 200, has_more: false },
+    })
+    mockedConvertersApi.createConverter.mockResolvedValue({
+      converter_id: 'persuasion',
+      identifier: {
+        class_name: 'PersuasionConverter',
+        class_module: 'pyrit.converter',
+        hash: 'persuasion-hash',
+        pyrit_version: '0.0.0',
+      },
+    })
+    const user = userEvent.setup()
+    renderDialog()
+
+    await selectConverterType('PersuasionConverter')
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getAllByText('Rewrites prompts.')).not.toHaveLength(0)
+    expect(screen.getAllByText('LLM')).not.toHaveLength(0)
+    expect(screen.getByRole('combobox', { name: /converter_target/i })).toHaveValue('')
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /converter_target/i }),
+      'rewrite-target',
+    )
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'PersuasionConverter',
+      type: 'PersuasionConverter',
+      params: { converter_target: 'rewrite-target' },
+    })
+  })
+
+  it('shows duplicate-name errors from the registry', async () => {
+    mockedConvertersApi.createConverter.mockRejectedValue(
+      new Error("Converter instance 'CaesarConverter' already exists"),
+    )
+    const user = userEvent.setup()
+    renderDialog()
+    await selectConverterType('CaesarConverter')
+    await user.type(screen.getByLabelText(/caesar_offset/i), '5')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+
+    expect(
+      await screen.findByText(/already exists/i),
+    ).toBeInTheDocument()
+  })
+
+  it('should not move focus onto an error from loading converter types', async () => {
+    mockedConvertersApi.listConverterTypes.mockRejectedValue(
+      new Error('converter registry unavailable'),
+    )
+    renderDialog()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/converter registry unavailable/i)
+    await act(async () => {
+      await new Promise<void>((resolve) => { requestAnimationFrame(() => resolve()) })
+    })
+
+    expect(alert).not.toHaveFocus()
+  })
+
+  it('should keep keyboard focus inside the dialog when creation fails', async () => {
+    const onClose = jest.fn()
+    mockedConvertersApi.createConverter.mockRejectedValue(
+      new Error("Converter instance 'CaesarConverter' already exists"),
+    )
+    const user = userEvent.setup()
+    renderDialog({ onClose })
+    await selectConverterType('CaesarConverter')
+    await user.type(screen.getByLabelText(/caesar_offset/i), '5')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/already exists/i)
+    await waitFor(() => expect(alert).toHaveFocus())
+    expect(alert.closest('[role="dialog"]')).toBe(screen.getByRole('dialog'))
+
+    await user.keyboard('{Escape}')
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('should focus a submission error even when a frame runs before React renders it', async () => {
+    // A frame callback can run before React commits the message bar, which is
+    // when focusing from one finds no node and silently does nothing.
+    jest.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      callback(performance.now())
+      return 0
+    })
+    mockedConvertersApi.createConverter.mockRejectedValue(
+      new Error("Converter instance 'CaesarConverter' already exists"),
+    )
+    const user = userEvent.setup()
+    renderDialog()
+    await submitCaesarConverter(user)
+
+    const alert = await screen.findByRole('alert')
+    await waitFor(() => expect(alert).toHaveFocus())
+  })
+
+  it('should not clear a later opening of the dialog when an earlier creation succeeds', async () => {
+    let resolveCreate: ((value: { converter_id: string }) => void) | undefined
+    mockedConvertersApi.createConverter.mockImplementation(
+      () => new Promise((resolve) => { resolveCreate = resolve }),
+    )
+    const onCreated = jest.fn()
+    const user = userEvent.setup()
+    const { rerender } = renderDialog({ onCreated })
+    await submitCaesarConverter(user)
+    await waitFor(() => expect(mockedConvertersApi.createConverter).toHaveBeenCalled())
+
+    // Dismissed while the request was in flight, then opened again and filled in.
+    rerender(dialogTree({ open: false, onCreated }))
+    rerender(dialogTree({ open: true, onCreated }))
+    await screen.findByRole('combobox', { name: /^converter type$/i })
+    await selectConverterType('CaesarConverter')
+    // Selecting a type prefills the registry name, so replace it rather than append.
+    await user.clear(screen.getByLabelText(/registry name/i))
+    await user.type(screen.getByLabelText(/registry name/i), 'my-second-converter')
+
+    await act(async () => {
+      resolveCreate?.({ converter_id: 'first-converter' })
+    })
+
+    // The list still refreshes, but the opening in front of the user is untouched.
+    expect(onCreated).toHaveBeenCalledWith('first-converter', false)
+    expect(screen.getByLabelText(/registry name/i)).toHaveValue('my-second-converter')
+    expect(screen.getByLabelText(/caesar_offset/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add Converter' })).toBeInTheDocument()
+  })
+
+  it('should not surface a submission error in a later opening of the dialog', async () => {
+    let rejectCreate: ((reason: Error) => void) | undefined
+    mockedConvertersApi.createConverter.mockImplementation(
+      () => new Promise((_, reject) => { rejectCreate = reject }),
+    )
+    const onClose = jest.fn()
+    const user = userEvent.setup()
+    const { rerender } = renderDialog({ onClose })
+    await submitCaesarConverter(user)
+    await waitFor(() => expect(mockedConvertersApi.createConverter).toHaveBeenCalled())
+
+    // Dismissed while the request was in flight, then opened again.
+    await user.keyboard('{Escape}')
+    expect(onClose).toHaveBeenCalled()
+    rerender(dialogTree({ open: false, onClose }))
+    rerender(dialogTree({ open: true, onClose }))
+    await screen.findByRole('combobox', { name: /^converter type$/i })
+
+    await act(async () => {
+      rejectCreate?.(new Error("Converter instance 'CaesarConverter' already exists"))
+    })
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByLabelText(/registry name/i)).toHaveValue('')
+  })
+
+  it('should display and submit the Binary enum default from metadata', async () => {
+    const user = userEvent.setup()
+    mockConverterParameters([{
+      name: 'bits_per_char',
+      type_name: 'BitsPerChar',
+      required: false,
+      choices: ['8', '16', '32'],
+      default: '16',
+    }], 'BinaryConverter')
+    renderDialog()
+    await selectConverterType('BinaryConverter')
+
+    expect(screen.getByRole('combobox', { name: 'bits_per_char' })).toHaveValue('16')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'BinaryConverter',
+      type: 'BinaryConverter',
+      params: { bits_per_char: '16' },
+    })
+  })
+
+  it('should submit random strategy fields as numbers', async () => {
+    const user = userEvent.setup()
+    mockConverterParameters([wordSelectionParameter])
+    renderDialog()
+    await selectConverterType('TextConverter')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'word_selection_strategy' }), 'random')
+
+    const proportion = screen.getByRole('spinbutton', { name: 'proportion' })
+    expect(proportion).toBeRequired()
+    expect(proportion).toHaveValue(null)
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(screen.getByText('proportion is required.')).toBeInTheDocument()
+    expect(mockedConvertersApi.createConverter).not.toHaveBeenCalled()
+    await user.type(proportion, '0.3')
+    await user.type(screen.getByRole('spinbutton', { name: 'seed' }), '42')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'TextConverter',
+      type: 'TextConverter',
+      params: { word_selection_strategy: { type: 'random', parameters: { proportion: 0.3, seed: 42 } } },
+    })
+  })
+
+  it('should validate required indices and submit a numeric list', async () => {
+    const user = userEvent.setup()
+    mockConverterParameters([wordSelectionParameter])
+    renderDialog()
+    await selectConverterType('TextConverter')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'word_selection_strategy' }), 'indices')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(screen.getByText('indices is required.')).toBeInTheDocument()
+    expect(mockedConvertersApi.createConverter).not.toHaveBeenCalled()
+
+    await user.type(screen.getByRole('textbox', { name: 'indices' }), '0, 2, 5')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'TextConverter',
+      type: 'TextConverter',
+      params: { word_selection_strategy: { type: 'indices', parameters: { indices: [0, 2, 5] } } },
+    })
+  })
+
+  it('should drop previous strategy fields and submit keyword arrays and booleans', async () => {
+    const user = userEvent.setup()
+    mockConverterParameters([wordSelectionParameter])
+    renderDialog()
+    await selectConverterType('TextConverter')
+    const strategy = screen.getByRole('combobox', { name: 'word_selection_strategy' })
+    await user.selectOptions(strategy, 'random')
+    await user.type(screen.getByRole('spinbutton', { name: 'seed' }), '42')
+    await user.selectOptions(strategy, 'keywords')
+
+    expect(screen.queryByRole('spinbutton', { name: 'seed' })).not.toBeInTheDocument()
+    const keywords = screen.getByRole('textbox', { name: 'keywords' })
+    expect(keywords).toHaveValue('')
+    await user.type(keywords, 'hello, world')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'case_sensitive' }), 'false')
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'TextConverter',
+      type: 'TextConverter',
+      params: {
+        word_selection_strategy: {
+          type: 'keywords',
+          parameters: { keywords: ['hello', 'world'], case_sensitive: false },
+        },
+      },
+    })
+  })
+
+  it.each([
+    ['indices', '0, nope', 'indices must be a number.'],
+    ['indices', '0, 1.5', 'indices must be an integer.'],
+    ['indices', '0, Infinity', 'indices must be a number.'],
+    ['random', '1.5', 'seed must be an integer.'],
+  ])('should reject invalid %s input %s without submitting', async (strategy, value, message) => {
+    const user = userEvent.setup()
+    mockConverterParameters([wordSelectionParameter])
+    renderDialog()
+    await selectConverterType('TextConverter')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'word_selection_strategy' }), strategy)
+    if (strategy === 'random') {
+      await user.type(screen.getByRole('spinbutton', { name: 'proportion' }), '0.3')
+    }
+    const input = strategy === 'indices'
+      ? screen.getByRole('textbox', { name: 'indices' })
+      : screen.getByRole('spinbutton', { name: 'seed' })
+    await user.type(input, value)
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+
+    expect(screen.getByText(message)).toBeInTheDocument()
+    expect(mockedConvertersApi.createConverter).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('should omit the strategy to preserve the converter default (reset: %s)', async (reset) => {
+    const user = userEvent.setup()
+    mockConverterParameters([wordSelectionParameter])
+    renderDialog()
+    await selectConverterType('TextConverter')
+    const strategy = screen.getByRole('combobox', { name: 'word_selection_strategy' })
+    expect(strategy).toHaveValue('')
+    if (reset) {
+      await user.selectOptions(strategy, 'random')
+      await user.selectOptions(strategy, '')
+    }
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'TextConverter',
+      type: 'TextConverter',
+      params: {},
+    })
+  })
+
+  it.each(['stopwords', 'candidate_words'])('should preserve an explicit empty %s array', async (name) => {
+    const user = userEvent.setup()
+    mockConverterParameters([wordSelectionParameter])
+    renderDialog()
+    await selectConverterType('TextConverter')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'word_selection_strategy' }), 'content')
+    await user.click(screen.getByRole('checkbox', { name: `Use empty list for ${name}` }))
+    expect(screen.getByRole('textbox', { name })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'TextConverter',
+      type: 'TextConverter',
+      params: {
+        word_selection_strategy: {
+          type: 'content',
+          parameters: { max_words: 2, skip_first: 1, min_word_length: 3, [name]: [] },
+        },
+      },
+    })
+  })
+
+  it('should restore omission when the empty-list choice is cleared', async () => {
+    const user = userEvent.setup()
+    mockConverterParameters([wordSelectionParameter])
+    renderDialog()
+    await selectConverterType('TextConverter')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'word_selection_strategy' }), 'content')
+    const emptyList = screen.getByRole('checkbox', { name: 'Use empty list for stopwords' })
+    await user.click(emptyList)
+    await user.click(emptyList)
+    expect(screen.getByRole('textbox', { name: 'stopwords' })).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'TextConverter',
+      type: 'TextConverter',
+      params: {
+        word_selection_strategy: {
+          type: 'content', parameters: { max_words: 2, skip_first: 1, min_word_length: 3 },
+        },
+      },
+    })
+  })
+
+  it.each([
+    'Optional[UnknownStrategy]',
+    'UnknownStrategy',
+    'UnknownStrategy | OtherStrategy',
+    'dict[str, list[int | str | float]]',
+    'list[str] | UnknownStrategy',
+    'int | float',
+  ])('should not expose unsupported %s inputs as editable strings', async (typeName) => {
+    const user = userEvent.setup()
+    mockConverterParameters([{
+      name: 'unresolved',
+      type_name: typeName,
+      required: false,
+      default: 'UnknownStrategy()',
+    }])
+    renderDialog()
+    await selectConverterType('TextConverter')
+    expect(screen.getByRole('textbox', { name: 'unresolved' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Add Converter' }))
+    expect(mockedConvertersApi.createConverter).toHaveBeenCalledWith({
+      name: 'TextConverter',
+      type: 'TextConverter',
+      params: {},
+    })
+  })
+})

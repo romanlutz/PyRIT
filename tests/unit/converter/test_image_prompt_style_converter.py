@@ -1,19 +1,22 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from unit.mocks import get_mock_target_identifier
 
+from pyrit.common.random_context import configure_random_seed
 from pyrit.converter import ImagePromptStyleConverter
 from pyrit.models import Message, MessagePiece
 from pyrit.prompt_target.common.prompt_target import PromptTarget
+from pyrit.registry import ConverterRegistry
 
 
 @pytest.fixture
-def mock_target() -> PromptTarget:
-    target = MagicMock()
+def mock_target() -> MagicMock:
+    target = MagicMock(spec=PromptTarget)
     response = Message(
         message_pieces=[
             MessagePiece(
@@ -47,6 +50,17 @@ def test_init_no_filter_picks_random(mock_target) -> None:
     assert converter._variation is None
 
 
+def test_init_no_filter_uses_configured_root_seed(mock_target) -> None:
+    try:
+        configure_random_seed(seed=42)
+        first = ImagePromptStyleConverter(converter_target=mock_target)
+        second = ImagePromptStyleConverter(converter_target=mock_target)
+
+        assert first._filter_name == second._filter_name
+    finally:
+        configure_random_seed(seed=None)
+
+
 def test_init_filter_path_custom_yaml(mock_target, tmp_path) -> None:
     custom_yaml = tmp_path / "custom_filter.yaml"
     custom_yaml.write_text("style_instructions: custom style\nvariations:\n  my_variation: description of variation\n")
@@ -57,6 +71,81 @@ def test_init_filter_path_custom_yaml(mock_target, tmp_path) -> None:
     )
     assert converter._filter_name == "custom_filter"
     assert "my_variation" in converter._variation_map
+
+
+def test_identifier_distinguishes_custom_filters_with_the_same_file_name(mock_target, tmp_path) -> None:
+    contents = {
+        "charcoal": "style_instructions: charcoal sketch\nvariations:\n  close_up: tight framing\n",
+        "neon": "style_instructions: neon cyberpunk\nvariations:\n  close_up: tight framing\n",
+        "charcoal_copy": "style_instructions: charcoal sketch\nvariations:\n  close_up: tight framing\n",
+    }
+    converters = {}
+    for folder, content in contents.items():
+        (tmp_path / folder).mkdir()
+        filter_file = tmp_path / folder / "gritty_documentary.yaml"
+        filter_file.write_text(content)
+        converters[folder] = ImagePromptStyleConverter(converter_target=mock_target, filter_path=filter_file)
+    built_in = ImagePromptStyleConverter(converter_target=mock_target, filter_name="gritty_documentary")
+
+    hashes = {name: converter.get_identifier().hash for name, converter in converters.items()}
+    assert hashes["charcoal"] != hashes["neon"]
+    assert hashes["charcoal"] == hashes["charcoal_copy"]
+    assert hashes["charcoal"] != built_in.get_identifier().hash
+    assert converters["charcoal"].get_identifier().params["filter_name"] == "gritty_documentary"
+    assert built_in.get_identifier().params.get("filter_hash") is None
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize(
+    ("variation_names", "variation"),
+    [
+        (("close_up", "CLOSE_UP"), "close_up"),
+        (("close_up", " close_up "), "close_up"),
+        (("close_up", "wide_shot"), None),
+    ],
+)
+async def test_identifier_distinguishes_variation_order_async(
+    mock_target: MagicMock,
+    tmp_path: Path,
+    variation_names: tuple[str, str],
+    variation: str | None,
+) -> None:
+    entries = [
+        f'  "{name}": {description}\n'
+        for name, description in zip(variation_names, ("tight framing", "wide framing"), strict=True)
+    ]
+    converters = []
+    for index, ordered_entries in enumerate((entries, list(reversed(entries)))):
+        folder = tmp_path / str(index)
+        folder.mkdir()
+        filter_file = folder / "custom_filter.yaml"
+        filter_file.write_text(
+            "style_instructions: charcoal sketch\nvariations:\n" + "".join(ordered_entries),
+            encoding="utf-8",
+        )
+        converters.append(
+            ImagePromptStyleConverter(
+                converter_target=mock_target,
+                filter_path=filter_file,
+                variation=variation,
+            )
+        )
+
+    system_prompts = []
+    try:
+        configure_random_seed(seed=42)
+        for converter in converters:
+            await converter.convert_async(prompt="person in a park")
+            system_prompts.append(mock_target.set_system_prompt_async.call_args.kwargs["system_prompt"])
+    finally:
+        configure_random_seed(seed=None)
+
+    assert system_prompts[0] != system_prompts[1]
+    assert converters[0].get_identifier().hash != converters[1].get_identifier().hash
+    registry = ConverterRegistry()
+    for converter in converters:
+        registry.instances.register(converter)
+    assert len(registry.instances.get_names()) == 2
 
 
 def test_init_filter_path_nonexistent_raises(mock_target) -> None:
@@ -155,7 +244,6 @@ def test_list_available_filters() -> None:
     assert len(filters) > 0
 
 
-@pytest.mark.asyncio
 async def test_convert_async_with_specific_variation(mock_target) -> None:
     converter = ImagePromptStyleConverter(
         converter_target=mock_target,
@@ -164,8 +252,8 @@ async def test_convert_async_with_specific_variation(mock_target) -> None:
     )
     result = await converter.convert_async(prompt="person walking through a dark alley")
 
-    mock_target.set_system_prompt.assert_called_once()
-    system_arg = mock_target.set_system_prompt.call_args[1]["system_prompt"]
+    mock_target.set_system_prompt_async.assert_called_once()
+    system_arg = mock_target.set_system_prompt_async.call_args[1]["system_prompt"]
     assert "bodycam_footage" in system_arg
     assert "style_instructions" not in system_arg or "CRITICAL INSTRUCTION" in system_arg
 
@@ -174,7 +262,6 @@ async def test_convert_async_with_specific_variation(mock_target) -> None:
     assert result.output_type == "text"
 
 
-@pytest.mark.asyncio
 async def test_convert_async_with_random_variation(mock_target) -> None:
     converter = ImagePromptStyleConverter(
         converter_target=mock_target,
@@ -182,15 +269,14 @@ async def test_convert_async_with_random_variation(mock_target) -> None:
     )
     result = await converter.convert_async(prompt="person in a park")
 
-    mock_target.set_system_prompt.assert_called_once()
-    system_arg = mock_target.set_system_prompt.call_args[1]["system_prompt"]
+    mock_target.set_system_prompt_async.assert_called_once()
+    system_arg = mock_target.set_system_prompt_async.call_args[1]["system_prompt"]
     # Should contain one of the variation names
     assert any(name in system_arg for name in converter._variations)
 
     assert result.output_text == "A blurry bodycam shot of a figure in a dark alley"
 
 
-@pytest.mark.asyncio
 async def test_convert_async_unsupported_input_type_raises(mock_target) -> None:
     converter = ImagePromptStyleConverter(
         converter_target=mock_target,
@@ -222,7 +308,7 @@ def test_duplicate_variation_prefix_logs_warning(mock_target, caplog) -> None:
         ),
         patch("pathlib.Path.exists", return_value=True),
         patch("builtins.open", mock_open()),
-        patch("yaml.safe_load", return_value=duplicate_yaml),
+        patch("pyrit.converter.image_prompt_style_converter.safe_load_yaml", return_value=duplicate_yaml),
     ):
         converter = ImagePromptStyleConverter(
             converter_target=mock_target,

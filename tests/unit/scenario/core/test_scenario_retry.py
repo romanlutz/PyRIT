@@ -3,16 +3,34 @@
 
 """Tests for Scenario retry functionality."""
 
+import asyncio
 from typing import ClassVar
-from unittest.mock import AsyncMock, MagicMock, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
+from pyrit.executor.attack import AttackParameters, AttackStrategy, SingleTurnAttackContext
 from pyrit.executor.attack.core import AttackExecutorResult
-from pyrit.memory import CentralMemory
-from pyrit.models import AttackOutcome, AttackResult, ComponentIdentifier
+from pyrit.executor.attack.core.attack_preparation import (
+    AttackPreparationFailure,
+    AttackPreparationFailureKind,
+)
+from pyrit.memory import CentralMemory, MemoryInterface
+from pyrit.models import (
+    AttackOutcome,
+    AttackResult,
+    AttackResultSelection,
+    AttackSeedGroup,
+    ComponentIdentifier,
+    Message,
+    ScenarioRunPlanGroupKind,
+    ScenarioRunState,
+    SeedObjective,
+    config_hash,
+)
+from pyrit.prompt_target import PromptTarget
 from pyrit.scenario import DatasetConfiguration, ScenarioResult
-from pyrit.scenario.core import AtomicAttack, BaselineAttackPolicy, Scenario, ScenarioTechnique
+from pyrit.scenario.core import AtomicAttack, AttackTechnique, BaselineAttackPolicy, Scenario, ScenarioTechnique
 
 # Test constants
 TEST_ATTACK_TYPE = "TestAttack"
@@ -39,7 +57,7 @@ def mock_objective_scorer():
 
 
 # Helper functions
-def save_attack_results_to_memory(attack_results, *, atomic_attack=None):
+async def save_attack_results_to_memory_async(attack_results, *, atomic_attack=None):
     """Helper function to save attack results to memory.
 
     When ``atomic_attack`` is provided, stamps ``attribution_parent_id`` and
@@ -54,7 +72,7 @@ def save_attack_results_to_memory(attack_results, *, atomic_attack=None):
                 r.attribution_parent_id = sid
                 r.attribution_data = {"parent_collection": name}
     memory = CentralMemory.get_memory_instance()
-    memory.add_attack_results_to_memory(attack_results=attack_results)
+    (await memory.add_attack_results_to_memory_async(attack_results=attack_results))
 
 
 def create_attack_result(
@@ -111,7 +129,7 @@ def create_mock_run_async(attack_results, *, atomic_attack=None):
     """
 
     async def mock_run_async(*args, **kwargs):
-        save_attack_results_to_memory(attack_results, atomic_attack=atomic_attack)
+        (await save_attack_results_to_memory_async(attack_results, atomic_attack=atomic_attack))
         return AttackExecutorResult(completed_results=attack_results, incomplete_objectives=[])
 
     return AsyncMock(side_effect=mock_run_async)
@@ -134,8 +152,11 @@ def create_mock_atomic_attack(name: str, objectives: list[str], run_async_mock: 
     mock_attack_strategy.get_attack_scoring_config.return_value = MagicMock()
 
     attack = MagicMock(spec=AtomicAttack)
+    attack.group_kind = ScenarioRunPlanGroupKind.ATTACK
+    attack.seed_group_adaptations = {}
     attack.atomic_attack_name = name
     attack.display_group = name
+    attack.technique_eval_hash = config_hash({"name": name, "objectives": objectives})
     attack._attack = mock_attack_strategy
     attack._scenario_result_id = None
 
@@ -148,18 +169,53 @@ def create_mock_atomic_attack(name: str, objectives: list[str], run_async_mock: 
     # behaves correctly in resume tests.
     from pyrit.common.utils import to_sha256
 
-    current_objectives = {"value": list(objectives)}
-    type(attack).objectives = PropertyMock(side_effect=lambda: current_objectives["value"])
-    type(attack).seed_groups = PropertyMock(side_effect=lambda: current_objectives["value"])
+    current_seed_groups = {
+        "value": [AttackSeedGroup(seeds=[SeedObjective(value=objective)]) for objective in objectives]
+    }
+    type(attack).objectives = PropertyMock(
+        side_effect=lambda: [seed_group.objective.value for seed_group in current_seed_groups["value"]]
+    )
+    type(attack).seed_groups = PropertyMock(side_effect=lambda: current_seed_groups["value"])
 
     def drop_hashes(*, hashes):
-        current_objectives["value"] = [o for o in current_objectives["value"] if to_sha256(o) not in hashes]
+        current_seed_groups["value"] = [
+            seed_group
+            for seed_group in current_seed_groups["value"]
+            if to_sha256(seed_group.objective.value) not in hashes
+        ]
 
     attack.drop_seed_groups_with_hashes = MagicMock(side_effect=drop_hashes)
 
     if run_async_mock:
         attack.run_async = run_async_mock
     return attack
+
+
+class _RetryLinkageAttack(AttackStrategy[SingleTurnAttackContext, AttackResult]):
+    """Minimal real strategy that exercises production result persistence."""
+
+    def __init__(self, *, objective_target: PromptTarget) -> None:
+        super().__init__(objective_target=objective_target, context_type=SingleTurnAttackContext)
+        self.executed_materializations: list[str] = []
+
+    def _validate_context(self, *, context: SingleTurnAttackContext) -> None:
+        pass
+
+    async def _setup_async(self, *, context: SingleTurnAttackContext) -> None:
+        pass
+
+    async def _perform_async(self, *, context: SingleTurnAttackContext) -> AttackResult:
+        assert context.params.prepended_conversation is not None
+        self.executed_materializations.append(context.params.prepended_conversation[0].get_value())
+        return AttackResult(
+            conversation_id=f"outer-{context.params.objective}",
+            objective=context.params.objective,
+            outcome=AttackOutcome.SUCCESS,
+            executed_turns=1,
+        )
+
+    async def _teardown_async(self, *, context: SingleTurnAttackContext) -> None:
+        pass
 
 
 class ConcreteScenario(Scenario):
@@ -175,7 +231,6 @@ class ConcreteScenario(Scenario):
             objective_scorer = MagicMock()
             objective_scorer.get_identifier.return_value = _mock_scorer_id("MockScorer")
 
-        kwargs.setdefault("default_technique", technique_class.ALL)
         kwargs.setdefault("default_dataset_config", DatasetConfiguration())
         super().__init__(technique_class=technique_class, objective_scorer=objective_scorer, **kwargs)
         self._atomic_attacks_to_return = atomic_attacks_to_return or []
@@ -211,7 +266,7 @@ def mock_atomic_attacks():
 @pytest.fixture
 def mock_objective_target():
     """Create a mock objective target for testing."""
-    target = MagicMock()
+    target = MagicMock(spec=PromptTarget)
     target.get_identifier.return_value = ComponentIdentifier(
         class_name="MockTarget",
         class_module=TEST_MODULE,
@@ -269,7 +324,7 @@ class TestScenarioRetry:
                 raise Exception("Test failure")
             # Retry succeeds
             results = [sample_attack_results[0]]
-            save_attack_results_to_memory(results, atomic_attack=mock_atomic_attacks[0])
+            (await save_attack_results_to_memory_async(results, atomic_attack=mock_atomic_attacks[0]))
             return AttackExecutorResult(completed_results=results, incomplete_objectives=[])
 
         mock_atomic_attacks[0].run_async = mock_run_with_retry
@@ -360,7 +415,7 @@ class TestScenarioRetry:
                 raise Exception("Test failure")
             # Third attempt succeeds
             results = [sample_attack_results[0]]
-            save_attack_results_to_memory(results, atomic_attack=mock_atomic_attacks[0])
+            (await save_attack_results_to_memory_async(results, atomic_attack=mock_atomic_attacks[0]))
             return AttackExecutorResult(completed_results=results, incomplete_objectives=[])
 
         mock_atomic_attacks[0].run_async = mock_run_with_multiple_retries
@@ -400,7 +455,7 @@ class TestScenarioRetry:
                 raise ValueError("First failure")
             # Retry succeeds
             results = [sample_attack_results[0]]
-            save_attack_results_to_memory(results, atomic_attack=mock_atomic_attacks[0])
+            (await save_attack_results_to_memory_async(results, atomic_attack=mock_atomic_attacks[0]))
             return AttackExecutorResult(completed_results=results, incomplete_objectives=[])
 
         mock_atomic_attacks[0].run_async = mock_run_with_logged_failure
@@ -438,6 +493,138 @@ class TestScenarioRetry:
 class TestScenarioResumption:
     """Tests for Scenario resumption after partial failure."""
 
+    @pytest.mark.parametrize("persistent_failure", [False, True], ids=["transient-read", "persistent-read"])
+    async def test_resume_read_failure_never_reexecutes_completed_objectives(
+        self, mock_objective_target, persistent_failure
+    ):
+        completed = create_mock_atomic_attack("completed", ["objective1"])
+        pending = create_mock_atomic_attack("pending", ["objective2"])
+        completed.run_async = create_mock_run_async([create_attack_result(1)], atomic_attack=completed)
+        pending.run_async = create_mock_run_async([create_attack_result(2)], atomic_attack=pending)
+        scenario = ConcreteScenario(
+            name="Resume Read Failure", version=1, atomic_attacks_to_return=[completed, pending]
+        )
+        scenario.set_params_from_args(args={"objective_target": mock_objective_target, "max_retries": 1})
+        await scenario.initialize_async()
+        completed.set_scenario_result_id(scenario._scenario_result_id)
+        (await save_attack_results_to_memory_async([create_attack_result(1)], atomic_attack=completed))
+
+        memory = CentralMemory.get_memory_instance()
+        original_get_results = memory.get_attack_results_async
+        reads = 0
+
+        async def read_results_async(**kwargs):
+            nonlocal reads
+            reads += 1
+            if persistent_failure or reads == 1:
+                raise RuntimeError("resume storage unavailable")
+            return await original_get_results(**kwargs)
+
+        with patch.object(memory, "get_attack_results_async", side_effect=read_results_async):
+            if persistent_failure:
+                with pytest.raises(RuntimeError, match="resume storage unavailable"):
+                    await scenario.run_async()
+            else:
+                await scenario.run_async()
+
+        completed.run_async.assert_not_called()
+        assert pending.run_async.call_count == (0 if persistent_failure else 1)
+        assert reads == 2
+        [stored] = await memory.get_scenario_results_async(scenario_result_ids=[scenario._scenario_result_id])
+        assert stored.number_tries == 2
+        assert stored.scenario_run_state == (
+            ScenarioRunState.FAILED if persistent_failure else ScenarioRunState.COMPLETED
+        )
+        assert len(stored.attack_results["completed"]) == 1
+        if persistent_failure:
+            assert completed.objectives == ["objective1"]
+            assert pending.objectives == ["objective2"]
+            assert stored.error_message == "resume storage unavailable"
+
+    async def test_resume_loads_one_result_snapshot_for_all_atomic_attacks(self, mock_objective_target):
+        attacks = [create_mock_atomic_attack(f"attack_{i}", [f"objective{i}"]) for i in range(10)]
+        scenario = ConcreteScenario(name="Resume Snapshot", version=1, atomic_attacks_to_return=attacks)
+        scenario.set_params_from_args(args={"objective_target": mock_objective_target})
+        await scenario.initialize_async()
+        for i, attack in enumerate(attacks[:5]):
+            attack.set_scenario_result_id(scenario._scenario_result_id)
+            (await save_attack_results_to_memory_async([create_attack_result(i)], atomic_attack=attack))
+
+        memory = CentralMemory.get_memory_instance()
+        with patch.object(memory, "get_attack_results_async", wraps=memory.get_attack_results_async) as read_results:
+            remaining = await scenario._get_remaining_atomic_attacks_async()
+
+        assert remaining == attacks[5:]
+        read_results.assert_called_once_with(
+            scenario_result_id=scenario._scenario_result_id, result_selection=AttackResultSelection.ALL_RESULTS
+        )
+
+    async def test_parameter_build_partial_result_persists_linkage_before_retry(
+        self,
+        mock_objective_target: MagicMock,
+    ) -> None:
+        """A successful build is executed, linked, and not materialized again on retry."""
+        target = MagicMock(spec=PromptTarget)
+        target.get_identifier.return_value = ComponentIdentifier(
+            class_name="RetryLinkageTarget",
+            class_module=TEST_MODULE,
+        )
+        attack = _RetryLinkageAttack(objective_target=target)
+        atomic_attack = AtomicAttack(
+            atomic_attack_name="retry_linkage",
+            attack_technique=AttackTechnique(attack=attack),
+            seed_groups=[
+                AttackSeedGroup(seeds=[SeedObjective(value="A")]),
+                AttackSeedGroup(seeds=[SeedObjective(value="B")]),
+            ],
+        )
+        scenario = ConcreteScenario(
+            name="Parameter Build Retry",
+            version=1,
+            atomic_attacks_to_return=[atomic_attack],
+        )
+        scenario.set_params_from_args(
+            args={
+                "objective_target": mock_objective_target,
+                "max_concurrency": 2,
+                "max_retries": 1,
+            }
+        )
+        await scenario.initialize_async()
+
+        a_built = asyncio.Event()
+        build_counts = {"A": 0, "B": 0}
+        generated_conversations: list[str] = []
+
+        async def build_async(*, seed_group: AttackSeedGroup, **_: object) -> AttackParameters:
+            objective = seed_group.objective.value
+            build_counts[objective] += 1
+            if objective == "A":
+                a_built.set()
+            elif build_counts[objective] == 1:
+                await a_built.wait()
+                raise RuntimeError("build B failed")
+
+            conversation_id = f"conv-{objective}-{build_counts[objective]}"
+            generated_conversations.append(conversation_id)
+            return AttackParameters(
+                objective=objective,
+                prepended_conversation=[Message.from_prompt(role="user", prompt=conversation_id)],
+            )
+
+        with patch.object(AttackParameters, "from_seed_group_async", new=AsyncMock(side_effect=build_async)):
+            result = await scenario.run_async()
+
+        assert build_counts == {"A": 1, "B": 2}
+        assert generated_conversations == ["conv-A-1", "conv-B-2"]
+        assert attack.executed_materializations == generated_conversations
+        assert [item.objective for item in result.attack_results["retry_linkage"]] == ["A", "B"]
+
+        persisted_results = await CentralMemory.get_memory_instance().get_attack_results_async(
+            scenario_result_id=scenario._scenario_result_id
+        )
+        assert [item.objective for item in persisted_results] == ["A", "B"]
+
     async def test_resumes_from_partial_completion_single_attack(self, mock_objective_target):
         """Test that scenario resumes from where it left off when an atomic attack partially completes."""
         objectives = ["obj1", "obj2", "obj3", "obj4"]
@@ -453,12 +640,12 @@ class TestScenarioResumption:
                 # First attempt: complete 2 objectives, then fail
                 executed_objectives.extend(["obj1", "obj2"])
                 results = [create_attack_result(i, objective=f"obj{i}") for i in [1, 2]]
-                save_attack_results_to_memory(results, atomic_attack=atomic_attack)
+                (await save_attack_results_to_memory_async(results, atomic_attack=atomic_attack))
                 raise Exception("Failed after 2 objectives")
             # Retry: should only execute remaining objectives (obj3, obj4)
             executed_objectives.extend(["obj3", "obj4"])
             results = [create_attack_result(i, objective=f"obj{i}") for i in [3, 4]]
-            save_attack_results_to_memory(results, atomic_attack=atomic_attack)
+            (await save_attack_results_to_memory_async(results, atomic_attack=atomic_attack))
             return AttackExecutorResult(completed_results=results, incomplete_objectives=[])
 
         atomic_attack.run_async = mock_run_with_partial_completion
@@ -497,7 +684,7 @@ class TestScenarioResumption:
         async def mock_run_attack1(*args, **kwargs):
             call_count["attack_1"] += 1
             results = [create_attack_result(1, objective="objective1")]
-            save_attack_results_to_memory(results, atomic_attack=attack1)
+            (await save_attack_results_to_memory_async(results, atomic_attack=attack1))
             return AttackExecutorResult(completed_results=results, incomplete_objectives=[])
 
         # Attack 2: Succeeds on first attempt, should not be retried
@@ -505,7 +692,7 @@ class TestScenarioResumption:
             call_count["attack_2"] += 1
             if call_count["attack_2"] == 1:
                 results = [create_attack_result(2, objective="objective2")]
-                save_attack_results_to_memory(results, atomic_attack=attack2)
+                (await save_attack_results_to_memory_async(results, atomic_attack=attack2))
                 return AttackExecutorResult(completed_results=results, incomplete_objectives=[])
             raise AssertionError("Attack 2 should not be retried after completion")
 
@@ -515,7 +702,7 @@ class TestScenarioResumption:
             if call_count["attack_3"] == 1:
                 raise Exception("Attack 3 failed on first attempt")
             results = [create_attack_result(3, objective="objective3")]
-            save_attack_results_to_memory(results, atomic_attack=attack3)
+            (await save_attack_results_to_memory_async(results, atomic_attack=attack3))
             return AttackExecutorResult(completed_results=results, incomplete_objectives=[])
 
         attack1.run_async = mock_run_attack1
@@ -561,7 +748,7 @@ class TestScenarioResumption:
         async def mock_run_attack1(*args, **kwargs):
             call_count["attack_1"] += 1
             results = [create_attack_result(1, objective="objective1")]
-            save_attack_results_to_memory(results, atomic_attack=attacks[0])
+            (await save_attack_results_to_memory_async(results, atomic_attack=attacks[0]))
             return AttackExecutorResult(completed_results=results, incomplete_objectives=[])
 
         # Attack 2: Fails on first attempt, succeeds on retry
@@ -570,21 +757,21 @@ class TestScenarioResumption:
             if call_count["attack_2"] == 1:
                 raise Exception("Attack 2 failed")
             results = [create_attack_result(2, objective="objective2")]
-            save_attack_results_to_memory(results, atomic_attack=attacks[1])
+            (await save_attack_results_to_memory_async(results, atomic_attack=attacks[1]))
             return AttackExecutorResult(completed_results=results, incomplete_objectives=[])
 
         # Attack 3: Only called on retry (after attack 2 succeeds)
         async def mock_run_attack3(*args, **kwargs):
             call_count["attack_3"] += 1
             results = [create_attack_result(3, objective="objective3")]
-            save_attack_results_to_memory(results, atomic_attack=attacks[2])
+            (await save_attack_results_to_memory_async(results, atomic_attack=attacks[2]))
             return AttackExecutorResult(completed_results=results, incomplete_objectives=[])
 
         # Attack 4: Only called on retry
         async def mock_run_attack4(*args, **kwargs):
             call_count["attack_4"] += 1
             results = [create_attack_result(4, objective="objective4")]
-            save_attack_results_to_memory(results, atomic_attack=attacks[3])
+            (await save_attack_results_to_memory_async(results, atomic_attack=attacks[3]))
             return AttackExecutorResult(completed_results=results, incomplete_objectives=[])
 
         attacks[0].run_async = mock_run_attack1
@@ -647,7 +834,7 @@ class TestScenarioForeignKeyResumeRegression:
                 create_attack_result(0, conversation_id="c1", objective="o1"),
                 create_attack_result(1, conversation_id="c2", objective="o2"),
             ]
-            save_attack_results_to_memory(partials, atomic_attack=atomic_attack)
+            (await save_attack_results_to_memory_async(partials, atomic_attack=atomic_attack))
             raise Exception("simulated crash after partial persistence")
 
         atomic_attack.run_async = first_run
@@ -676,7 +863,7 @@ class TestScenarioForeignKeyResumeRegression:
                 create_attack_result(i, conversation_id=f"c{i + 1}", objective=obj)
                 for i, obj in enumerate(atomic_attack_resume.objectives, start=2)
             ]
-            save_attack_results_to_memory(results, atomic_attack=atomic_attack_resume)
+            (await save_attack_results_to_memory_async(results, atomic_attack=atomic_attack_resume))
             return AttackExecutorResult(completed_results=results, incomplete_objectives=[])
 
         atomic_attack_resume.run_async = second_run
@@ -746,8 +933,8 @@ class TestScenarioForeignKeyResumeRegression:
 
 
 @pytest.mark.usefixtures("patch_central_database")
-class TestGetCompletedObjectiveHashesForAttack:
-    """Direct tests for ``Scenario._get_completed_objective_hashes_for_attack``
+class TestGetCompletedObjectiveHashesByAttack:
+    """Direct tests for ``Scenario._get_completed_objective_hashes_by_attack``
     — the filter that excludes already-completed objectives on resume.
 
     Covers the row-filtering branches: outcome=ERROR rows, rows without
@@ -758,35 +945,29 @@ class TestGetCompletedObjectiveHashesForAttack:
     def _make_scenario(self, scenario_result_id="scn-1"):
         scenario = ConcreteScenario(name="S", version=1, atomic_attacks_to_return=[])
         scenario._scenario_result_id = scenario_result_id
-        scenario._memory = MagicMock()
+        scenario._memory = MagicMock(spec=MemoryInterface)
         return scenario
 
-    def _make_atomic(self, name, eval_hash="hash-A"):
-        atomic = MagicMock(spec=AtomicAttack)
-        atomic.atomic_attack_name = name
-        type(atomic).technique_eval_hash = PropertyMock(return_value=eval_hash)
-        return atomic
-
-    def _row(self, *, objective, outcome=AttackOutcome.SUCCESS, attribution_data=None):
+    def _row(self, *, objective, outcome=AttackOutcome.SUCCESS, attribution_data=None, metadata=None):
         row = MagicMock()
         row.outcome = outcome
         row.attribution_data = attribution_data
         row.objective = objective
+        row.metadata = metadata if metadata is not None else {}
+        row.outcome_reason = None
         return row
 
-    def test_returns_empty_when_scenario_result_id_unset(self):
+    async def test_returns_empty_when_scenario_result_id_unset(self):
         scenario = ConcreteScenario(name="S", version=1, atomic_attacks_to_return=[])
         scenario._scenario_result_id = None
-        result = scenario._get_completed_objective_hashes_for_attack(
-            atomic_attack=self._make_atomic("a"),
-        )
-        assert result == set()
+        result = await scenario._get_completed_objective_hashes_by_attack_async()
+        assert result == {}
 
-    def test_skips_error_rows(self):
+    async def test_skips_error_rows(self):
         from pyrit.common.utils import to_sha256
 
         scenario = self._make_scenario()
-        scenario._memory.get_attack_results.return_value = [
+        scenario._memory.get_attack_results_async.return_value = [
             self._row(
                 objective="ok",
                 outcome=AttackOutcome.SUCCESS,
@@ -798,35 +979,87 @@ class TestGetCompletedObjectiveHashesForAttack:
                 attribution_data={"parent_collection": "a", "parent_eval_hash": "hash-A"},
             ),
         ]
-        result = scenario._get_completed_objective_hashes_for_attack(
-            atomic_attack=self._make_atomic("a"),
-        )
-        assert result == {to_sha256("ok")}
+        result = await scenario._get_completed_objective_hashes_by_attack_async()
+        assert result == {("a", "hash-A"): {to_sha256("ok")}}
 
-    def test_skips_rows_without_attribution_data(self):
+    async def test_skips_rows_that_never_reached_the_objective_target(self):
+        """A preparation failure never sent anything to the objective target, so the
+        objective stays pending. A measured FAILURE is a real result and counts as
+        completed."""
         from pyrit.common.utils import to_sha256
 
         scenario = self._make_scenario()
-        scenario._memory.get_attack_results.return_value = [
+        scenario._memory.get_attack_results_async.return_value = [
+            self._row(
+                objective="measured-failure",
+                outcome=AttackOutcome.FAILURE,
+                attribution_data={"parent_collection": "a", "parent_eval_hash": "hash-A"},
+            ),
+            self._row(
+                objective="provider-blocked",
+                outcome=AttackOutcome.UNDETERMINED,
+                attribution_data={"parent_collection": "a", "parent_eval_hash": "hash-A"},
+                metadata=AttackPreparationFailure(
+                    kind=AttackPreparationFailureKind.ADVERSARIAL_CHAT_BLOCKED,
+                    reason="blocked before any prompt was sent",
+                ).to_metadata(),
+            ),
+            self._row(
+                objective="model-refused",
+                outcome=AttackOutcome.UNDETERMINED,
+                attribution_data={"parent_collection": "a", "parent_eval_hash": "hash-A"},
+                metadata=AttackPreparationFailure(
+                    kind=AttackPreparationFailureKind.ADVERSARIAL_CHAT_REFUSED,
+                    reason="adversarial model refused before any prompt was sent",
+                ).to_metadata(),
+            ),
+        ]
+        result = await scenario._get_completed_objective_hashes_by_attack_async()
+        assert result == {("a", "hash-A"): {to_sha256("measured-failure")}}
+
+    @pytest.mark.parametrize(
+        "reason",
+        ["No objective scorer configured", "Scorer could not reach a verdict"],
+    )
+    async def test_counts_undetermined_rows_that_reached_the_target_as_completed(self, reason):
+        """An UNDETERMINED row that *did* reach the objective target recorded the best
+        verdict the configuration allows. Retrying it would re-send the objective on every
+        resume without ever converging, so it must count as completed."""
+        from pyrit.common.utils import to_sha256
+
+        scenario = self._make_scenario()
+        row = self._row(
+            objective="no-verdict",
+            outcome=AttackOutcome.UNDETERMINED,
+            attribution_data={"parent_collection": "a", "parent_eval_hash": "hash-A"},
+        )
+        row.outcome_reason = reason
+        scenario._memory.get_attack_results_async.return_value = [row]
+        result = await scenario._get_completed_objective_hashes_by_attack_async()
+        assert result == {("a", "hash-A"): {to_sha256("no-verdict")}}
+
+    async def test_skips_rows_without_attribution_data(self):
+        from pyrit.common.utils import to_sha256
+
+        scenario = self._make_scenario()
+        scenario._memory.get_attack_results_async.return_value = [
             self._row(objective="legacy", attribution_data=None),
             self._row(
                 objective="new",
                 attribution_data={"parent_collection": "a", "parent_eval_hash": "hash-A"},
             ),
         ]
-        result = scenario._get_completed_objective_hashes_for_attack(
-            atomic_attack=self._make_atomic("a"),
-        )
-        assert result == {to_sha256("new")}
+        result = await scenario._get_completed_objective_hashes_by_attack_async()
+        assert result == {("a", "hash-A"): {to_sha256("new")}}
 
-    def test_skips_rows_with_mismatched_eval_hash(self):
+    async def test_indexes_same_name_techniques_separately(self):
         """Two atomic attacks with the same name but different techniques
         must not cross-pollinate completed hashes. This is the core Option-B
         guarantee."""
         from pyrit.common.utils import to_sha256
 
         scenario = self._make_scenario()
-        scenario._memory.get_attack_results.return_value = [
+        scenario._memory.get_attack_results_async.return_value = [
             self._row(
                 objective="mine",
                 attribution_data={"parent_collection": "encoding", "parent_eval_hash": "hash-base64"},
@@ -836,27 +1069,26 @@ class TestGetCompletedObjectiveHashesForAttack:
                 attribution_data={"parent_collection": "encoding", "parent_eval_hash": "hash-hex"},
             ),
         ]
-        result = scenario._get_completed_objective_hashes_for_attack(
-            atomic_attack=self._make_atomic("encoding", eval_hash="hash-base64"),
-        )
-        assert result == {to_sha256("mine")}
+        result = await scenario._get_completed_objective_hashes_by_attack_async()
+        assert result == {
+            ("encoding", "hash-base64"): {to_sha256("mine")},
+            ("encoding", "hash-hex"): {to_sha256("theirs")},
+        }
 
-    def test_backward_compat_matches_name_only_when_eval_hash_missing(self):
+    async def test_backward_compat_matches_name_only_when_eval_hash_missing(self):
         """Rows persisted before ``parent_eval_hash`` shipped match name-only
         so pre-existing resume runs aren't stranded."""
         from pyrit.common.utils import to_sha256
 
         scenario = self._make_scenario()
-        scenario._memory.get_attack_results.return_value = [
+        scenario._memory.get_attack_results_async.return_value = [
             self._row(
                 objective="old",
                 attribution_data={"parent_collection": "a"},  # no parent_eval_hash
             ),
         ]
-        result = scenario._get_completed_objective_hashes_for_attack(
-            atomic_attack=self._make_atomic("a", eval_hash="hash-A"),
-        )
-        assert result == {to_sha256("old")}
+        result = await scenario._get_completed_objective_hashes_by_attack_async()
+        assert result == {("a", None): {to_sha256("old")}}
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -873,6 +1105,7 @@ class TestApplyPersistedObjectives:
 
     def test_noop_when_metadata_has_no_persisted_hashes(self):
         atomic = MagicMock(spec=AtomicAttack)
+        atomic.group_kind = ScenarioRunPlanGroupKind.ATTACK
         scenario = self._make_scenario_with_atomics([atomic])
         stored = MagicMock()
         stored.metadata = {}
@@ -881,8 +1114,10 @@ class TestApplyPersistedObjectives:
 
     def test_replays_persisted_subset_across_atomics(self):
         atomic_a = MagicMock(spec=AtomicAttack)
+        atomic_a.group_kind = ScenarioRunPlanGroupKind.ATTACK
         atomic_a.keep_seed_groups_with_hashes.return_value = {"h1", "h2"}
         atomic_b = MagicMock(spec=AtomicAttack)
+        atomic_b.group_kind = ScenarioRunPlanGroupKind.ATTACK
         atomic_b.keep_seed_groups_with_hashes.return_value = {"h3"}
         scenario = self._make_scenario_with_atomics([atomic_a, atomic_b])
 
@@ -895,6 +1130,7 @@ class TestApplyPersistedObjectives:
 
     def test_raises_when_persisted_hash_is_missing(self):
         atomic = MagicMock(spec=AtomicAttack)
+        atomic.group_kind = ScenarioRunPlanGroupKind.ATTACK
         atomic.keep_seed_groups_with_hashes.return_value = {"h1"}  # h2 missing
         scenario = self._make_scenario_with_atomics([atomic])
 

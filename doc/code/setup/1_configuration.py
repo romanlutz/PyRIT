@@ -9,20 +9,8 @@
 #       jupytext_version: 1.19.4
 # ---
 
-# %%
-from pyrit.output import output_attack_async
-
-# ---
-# jupyter:
-#   jupytext:
-#     text_representation:
-#       extension: .py
-#       format_name: percent
-#       format_version: '1.3'
-#       jupytext_version: 1.19.1
-# ---
 # %% [markdown]
-# # 1. Configuration
+# # Configuration
 #
 # Before running PyRIT, you need to call the `initialize_pyrit_async` function which will set up your configuration.
 #
@@ -120,6 +108,23 @@ target3 = OpenAIChatTarget(
 #    ```bash
 #    az login
 #    ```
+#
+# ### Choosing between key and Entra auth
+#
+# Authentication is explicit. `auth_mode="api_key"` (the default) resolves a credential in this order: a token provider callable passed as `api_key`, an explicit `api_key` string, then the target's API key environment variable. If none of those yield a key and the endpoint is a recognized Azure host, it falls back to an Entra token provider; that fallback emits a `DeprecationWarning` and is removed in 1.4.0.
+#
+# Pass `auth_mode="identity"` when you want Entra auth. It ignores the target's API key environment variable entirely, so an unrelated key in your `.env` can no longer override your choice. It raises a `ValueError` if you also pass an explicit `api_key`, since identity mints its own token and would silently discard the credential you supplied. It also raises a `ValueError` if the endpoint is not a recognized Azure endpoint rather than minting a token for an unknown host.
+#
+# ```python
+# target = OpenAIChatTarget(
+#     endpoint=os.environ["OPENAI_CHAT_ENDPOINT"],
+#     auth_mode="identity",
+# )
+# ```
+#
+# `auth_mode` applies to the OpenAI targets, `AzureMLChatTarget`, and `PromptShieldTarget`. `AzureBlobStorageTarget` accepts the same `auth_mode="identity"` to bypass its SAS token sources; when no SAS token is configured it still selects a credential automatically, and that fallback is deprecated on the same schedule.
+#
+# > **Migration note.** Earlier versions silently minted an Entra token when no key was found and the endpoint looked like an Azure host. That fallback still works, but it is deprecated and removed in 1.4.0 because it made an explicit `auth_mode="identity"` indistinguishable from "no key configured". Pass `auth_mode="identity"` instead (or a token provider as `api_key`, as the examples above do).
 
 # %% [markdown]
 # ## Choosing a database
@@ -132,6 +137,12 @@ target3 = OpenAIChatTarget(
 # When you call initialize_pyrit_async, you can pass it initialization_scripts and/or initializers. An initializer is a discrete, ordered unit of startup configuration: it runs once at init time and **prepares PyRIT's shared state** — registering targets/scorers/techniques into their registries, seeding datasets into memory, or setting default values — so downstream consumers (scenarios, attacks, the CLI, the GUI) find what they need without wiring it up by hand. It is recommended to always use an initializer.
 #
 # For a tour of the built-in initializers and how to write your own, see the [initializers](./pyrit_initializer.ipynb) notebook. Here we focus on how that shared state is consumed.
+#
+# Initializer arguments follow their declared types. For example,
+# `target:tags=default,scorer;auto_group=false` on the CLI configures a tag list
+# and a boolean. YAML may supply the same values as a list and `false`.
+# Omitted or null arguments use declared defaults. Configuration validates the
+# parameters but does not execute the initializer; setup runs them in order.
 #
 # ### Using Built-In Initializers
 #
@@ -148,6 +159,7 @@ from pyrit.executor.attack import (
     AttackScoringConfig,
     PromptSendingAttack,
 )
+from pyrit.output import output_attack_async
 from pyrit.prompt_normalizer.converter_configuration import (
     ConverterConfiguration,
 )

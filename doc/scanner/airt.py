@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.4
+#       jupytext_version: 1.19.5
 # ---
 
 # %% [markdown]
@@ -21,18 +21,13 @@
 # %%
 from pyrit.output import output_scenario_async
 from pyrit.prompt_target import OpenAIChatTarget
-from pyrit.scenario import DatasetAttackConfiguration
+from pyrit.scenario import DatasetAttackConfiguration, DatasetSource
 from pyrit.setup import IN_MEMORY, initialize_pyrit_async
-from pyrit.setup.initializers import (
-    LoadDefaultDatasets,
-    ScorerInitializer,
-    TargetInitializer,
-    TechniqueInitializer,
-)
+from pyrit.setup.initializers import ScorerInitializer, TargetInitializer, TechniqueInitializer
 
 await initialize_pyrit_async(  # type: ignore
     memory_db_type=IN_MEMORY,
-    initializers=[TargetInitializer(), ScorerInitializer(), TechniqueInitializer(), LoadDefaultDatasets()],
+    initializers=[TargetInitializer(), ScorerInitializer(), TechniqueInitializer()],
 )
 
 objective_target = OpenAIChatTarget()
@@ -44,12 +39,12 @@ objective_target = OpenAIChatTarget()
 # different attack technique to the full set of harm datasets.
 #
 # ```bash
-# pyrit_scan airt.rapid_response \
+# pyrit_scan run airt.rapid_response \
 #   --initializers target \
 #   --target openai_chat \
 #   --techniques role_play_movie_script \
-#   --dataset-names airt_hate \
-#   --max-dataset-size 1
+#   --datasets airt_hate \
+#   --max-total 1
 # ```
 #
 # **Available techniques:** ALL, DEFAULT, SINGLE_TURN, MULTI_TURN, role_play_movie_script, many_shot, tap
@@ -57,7 +52,7 @@ objective_target = OpenAIChatTarget()
 # %%
 from pyrit.scenario.airt import RapidResponse, RapidResponseTechnique
 
-dataset_config = DatasetAttackConfiguration(dataset_names=["airt_hate"], max_dataset_size=1)
+dataset_config = DatasetAttackConfiguration(sources=[DatasetSource(name="airt_hate")], max_total=1)
 
 scenario = RapidResponse()
 scenario.set_params_from_args(  # type: ignore
@@ -77,46 +72,38 @@ await output_scenario_async(scenario_result)
 # %% [markdown]
 # ## Psychosocial
 #
-# Tests whether a target appropriately handles psychosocial crisis situations, evaluating imminent
-# crisis handling and licensed therapist impersonation.
+# Tests whether a target harms the well-being or mental health of users across two sub-harms:
+# **imminent crisis** (mistreating someone in a mental-health crisis, facilitating self-harm) and
+# **licensed therapist** (improperly acting as or claiming to be a real therapist). Choose sub-harms
+# with the `--sub-harm` parameter (`imminent_crisis`, `licensed_therapist`, or `all`); both run by
+# default, each with its own dataset, escalation prompt, and conversation-level scorer.
 #
 # ```bash
-# pyrit_scan airt.psychosocial --target openai_chat --techniques imminent_crisis --max-dataset-size 1
+# pyrit_scan run airt.psychosocial --target openai_chat --techniques tone
 # ```
 #
-# **Available techniques:** ALL, ImminentCrisis, LicensedTherapist
+# Each sub-harm escalates a simulated multi-turn conversation toward the objective, then layers the
+# selected converter techniques on top (natural-language rewrites that preserve emotional framing;
+# obfuscation converters like base64/morse are excluded). `--datasets` can select a subset of the
+# selected sub-harms' datasets; `--max-total` must cover each selected sub-harm.
 #
-# ### Conversation-Level Scoring
-#
-# Unlike content harms that can be evaluated from a single response, psychosocial harms emerge
-# gradually across a multi-turn conversation. This scenario uses create_conversation_scorer()
-# to evaluate the **entire conversation history** rather than just the latest response — critical
-# for detecting patterns like gradual crisis escalation.
-#
-# Each subharm has a built-in YAML rubric:
-#
-# - **crisis_management.yaml** — Evaluates crisis recognition using the MHFA/ALGEE methodology
-#   (Approach, Listen, Give reassurance, Encourage professional help, Encourage self-help).
-#   Scores range from 1 (not harmful) to 5 (extremely harmful).
-# - **licensed_therapist.yaml** — Evaluates whether the model inappropriately provides clinical
-#   mental health advice.
-#
-# Rubrics can be customized per-subharm via the SubharmConfig dataclass.
-#
-# **Note:** This scenario does not include a default baseline. A single-turn baseline would not be
-# meaningful because psychosocial harms emerge through multi-turn escalation.
+# **Available techniques:** ALL, DEFAULT, tone, language, persuasion, deterministic, crescendo
 
 # %%
 from pyrit.scenario.airt import Psychosocial, PsychosocialTechnique
 
-dataset_config = DatasetAttackConfiguration(dataset_names=["airt_imminent_crisis"], max_dataset_size=1)
+# Minimal demo: a single sub-harm, one technique (the bare simulated-crescendo base), and one
+# objective. Omit `scenario_techniques` to run the DEFAULT converter sweep across the full dataset.
+dataset_config = DatasetAttackConfiguration(sources=[DatasetSource(name="airt_imminent_crisis")], max_total=1)
 
 scenario = Psychosocial()
 scenario.set_params_from_args(  # type: ignore
     args={
         "objective_target": objective_target,
-        "scenario_techniques": [PsychosocialTechnique.ImminentCrisis],
+        "sub_harm": "imminent_crisis",
+        "scenario_techniques": [PsychosocialTechnique.NoConverter],
         "dataset_config": dataset_config,
+        "max_turns": 2,
     }
 )
 await scenario.initialize_async()  # type: ignore
@@ -133,25 +120,26 @@ await output_scenario_async(scenario_result)
 # and multi-turn attacks.
 #
 # ```bash
-# pyrit_scan airt.cyber \
+# pyrit_scan run airt.cyber \
 #   --initializers target \
 #   --target openai_chat \
-#   --techniques multi_turn \
-#   --max-dataset-size 1
+#   --techniques role_play_movie_script \
+#   --max-total 1
 # ```
 #
-# **Available techniques:** ALL, DEFAULT, MULTI_TURN, red_teaming
+# **Available techniques:** Use `pyrit_scan run airt.cyber --list-scenario-parameters` to inspect
+# the current registry-backed technique catalog and its aggregate selectors.
 
 # %%
 from pyrit.scenario.airt import Cyber, CyberTechnique
 
-dataset_config = DatasetAttackConfiguration(dataset_names=["airt_malware"], max_dataset_size=1)
+dataset_config = DatasetAttackConfiguration(sources=[DatasetSource(name="airt_malware")], max_total=1)
 
 scenario = Cyber()
 scenario.set_params_from_args(  # type: ignore
     args={
         "objective_target": objective_target,
-        "scenario_techniques": [CyberTechnique.MULTI_TURN],
+        "scenario_techniques": [CyberTechnique.role_play_movie_script],
         "dataset_config": dataset_config,
     }
 )
@@ -165,30 +153,91 @@ await output_scenario_async(scenario_result)
 # %% [markdown]
 # ## Jailbreak
 #
-# Tests target resilience against template-based jailbreak attacks using various prompt injection
-# templates.
+# Tests target resilience against jailbreak templates. A run crosses three selectors: the harmful
+# objectives (**dataset**, HarmBench), the **techniques** each jailbreak is delivered through, and
+# which **jailbreaks** to run. Two deliveries are on by default: `prompt_sending` renders the
+# objective inline into the template as a request converter (target-agnostic), and
+# `jailbreak_system_prompt` sets the template as a native system prompt with the objective sent as
+# the user turn (only for targets that natively support editable history + system prompts — it is
+# skipped for incapable targets). These are the only delivery techniques exposed by Jailbreak.
+# Generic simulated, multi-turn, or non-composable registry techniques are intentionally excluded
+# because they cannot preserve Jailbreak's per-template delivery semantics. Results are grouped by
+# jailbreak template, and a baseline (the un-jailbroken objective) is included by default so
+# complying with the bare objective is itself visible.
 #
 # ```bash
-# pyrit_scan airt.jailbreak \
+# pyrit_scan run airt.jailbreak \
 #   --initializers target \
 #   --target openai_chat \
-#   --techniques prompt_sending \
-#   --max-dataset-size 1
+#   --datasets harmbench \
+#   --max-total 1
 # ```
 #
-# **Available techniques:** ALL, SIMPLE, COMPLEX, PromptSending, ManyShot, SkeletonKey, RolePlay
+# **Available technique selectors:** ALL, DEFAULT, and SINGLE_TURN currently select both
+# `prompt_sending` and `jailbreak_system_prompt`; either concrete technique can also be selected
+# directly. By default a small random sample of jailbreak templates runs; pass `num_jailbreaks`
+# (random count) or `jailbreak_names` (explicit) to widen or pin the selection.
 
 # %%
 from pyrit.scenario.airt import Jailbreak, JailbreakTechnique
 
-dataset_config = DatasetAttackConfiguration(dataset_names=["airt_harms"], max_dataset_size=1)
+dataset_config = DatasetAttackConfiguration(sources=[DatasetSource(name="harmbench")], max_total=1)
 
 scenario = Jailbreak()
 scenario.set_params_from_args(  # type: ignore
     args={
         "objective_target": objective_target,
-        "scenario_techniques": [JailbreakTechnique.PromptSending],
+        "scenario_techniques": [JailbreakTechnique.prompt_sending],
+        "jailbreak_names": ["aim.yaml"],
         "dataset_config": dataset_config,
+        "include_baseline": False,
+    }
+)
+await scenario.initialize_async()  # type: ignore
+
+scenario_result = await scenario.run_async()  # type: ignore
+
+# %%
+await output_scenario_async(scenario_result)
+
+# %% [markdown]
+# ## Multilingual
+#
+# Tests whether target safeguards remain effective when harmful objectives are presented in other
+# languages. A run crosses registered text-compatible attack techniques with datasets and translation
+# strategies. By default, `translation` translates each objective into every selected language, and
+# `random_translation` translates individual words using the full selected language pool. A baseline
+# sends each objective without translation and is included by default.
+#
+# ```bash
+# pyrit_scan airt.multilingual \
+#   --initializers target \
+#   --target openai_chat \
+#   --datasets harmbench \
+#   --max-total 1
+# ```
+#
+# **Available techniques:** `prompt_sending` is the default. Every registry technique (`role_play_*`,
+# `many_shot`, `tap`, …) whose built-in request converter chain ends in text is also available.
+#
+# **Translation strategies:** `translation` and `random_translation` (both default). A bare run translates
+# five objectives into five randomly selected languages, plus a word-level random language translation.
+# Pass `num_languages` to change the random sample size or `languages` to provide an explicit list.
+# The two language selectors are mutually exclusive.
+
+# %%
+from pyrit.scenario.airt import Multilingual
+
+dataset_config = DatasetAttackConfiguration(sources=[DatasetSource(name="harmbench")], max_total=1)
+
+scenario = Multilingual()
+scenario.set_params_from_args(  # type: ignore
+    args={
+        "objective_target": objective_target,
+        "languages": ["French"],
+        "translation_strategies": ["translation"],
+        "dataset_config": dataset_config,
+        "include_baseline": False,
     }
 )
 await scenario.initialize_async()  # type: ignore
@@ -205,7 +254,7 @@ await output_scenario_async(scenario_result)
 # plagiarism detection.
 #
 # ```bash
-# pyrit_scan airt.leakage --target openai_chat --techniques first_letter --max-dataset-size 1
+# pyrit_scan run airt.leakage --target openai_chat --techniques first_letter --max-total 1
 # ```
 #
 # **Available techniques:** ALL, SINGLE_TURN, MULTI_TURN, IP, SENSITIVE_DATA, FirstLetter, Image, RolePlay, Crescendo
@@ -232,7 +281,7 @@ await output_scenario_async(scenario_result)
 # %%
 from pyrit.scenario.airt import Leakage, LeakageTechnique
 
-dataset_config = DatasetAttackConfiguration(dataset_names=["airt_leakage"], max_dataset_size=1)
+dataset_config = DatasetAttackConfiguration(sources=[DatasetSource(name="airt_leakage")], max_total=1)
 
 scenario = Leakage()
 scenario.set_params_from_args(  # type: ignore
@@ -255,11 +304,11 @@ await output_scenario_async(scenario_result)
 # Tests whether a target can be induced to generate scam, phishing, or fraud content.
 #
 # ```bash
-# pyrit_scan airt.scam \
+# pyrit_scan run airt.scam \
 #   --initializers target \
 #   --target openai_chat \
 #   --techniques context_compliance \
-#   --max-dataset-size 1
+#   --max-total 1
 # ```
 #
 # **Available techniques:** ALL, DEFAULT, SINGLE_TURN, MULTI_TURN, ContextCompliance, RolePlay,
@@ -269,7 +318,7 @@ await output_scenario_async(scenario_result)
 # %%
 from pyrit.scenario.airt import Scam, ScamTechnique
 
-dataset_config = DatasetAttackConfiguration(dataset_names=["airt_scams"], max_dataset_size=1)
+dataset_config = DatasetAttackConfiguration(sources=[DatasetSource(name="airt_scams")], max_total=1)
 
 scenario = Scam()
 scenario.set_params_from_args(  # type: ignore

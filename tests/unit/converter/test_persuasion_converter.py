@@ -72,7 +72,6 @@ async def test_persuasion_converter_send_prompt_async_bad_json_exception_retries
                     converted_value=converted_value,
                     original_value_data_type="text",
                     converted_value_data_type="text",
-                    labels={"test": "test"},
                 )
             ]
         )
@@ -130,6 +129,7 @@ async def test_persuasion_converter_missing_mutated_text_raises_invalid_json(sql
                 await prompt_persuasion.convert_async(prompt="testing")
 
 
+@pytest.mark.usefixtures("patch_central_database")
 def test_persuasion_converter_input_supported():
     prompt_target = MockPromptTarget()
     prompt_persuasion = PersuasionConverter(

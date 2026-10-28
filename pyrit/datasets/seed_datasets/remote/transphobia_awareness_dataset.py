@@ -34,7 +34,7 @@ class _TransphobiaAwarenessDataset(_RemoteDatasetLoader):
     Dylan Doyle, Dipto Das, Michael Ann DeVito, Jed Brubaker.
     "Transphobia is in the Eye of the Prompter:
     Trans-Centered Perspectives on Large Language Models."
-    ACM Transactions on Computer-Human Interaction (2018).
+    ACM Transactions on Computer-Human Interaction (2025).
     """
 
     # Metadata
@@ -62,7 +62,7 @@ class _TransphobiaAwarenessDataset(_RemoteDatasetLoader):
         return "transphobia_awareness"
 
     @override
-    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
+    async def _fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch Transphobia-Awareness dataset and return as SeedDataset.
 

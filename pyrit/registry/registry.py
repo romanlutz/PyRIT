@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import inspect
 import logging
+import threading
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
 
+from pyrit.registry.instance_registry import DefaultInstanceRegistry, InstanceRegistry
 from pyrit.registry.registry_metadata import RegistryMetadata
 from pyrit.registry.resolution import (
     derive_parameters,
@@ -40,15 +42,35 @@ from pyrit.registry.resolution import (
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
     from types import ModuleType
+    from typing import Self
 
-    from typing_extensions import Self
-
+    from pyrit.models import Identifiable
     from pyrit.models.identifiers.component_identifier import ComponentIdentifier
     from pyrit.models.parameter import ComponentType, Parameter
 
 logger = logging.getLogger(__name__)
 
+
+@runtime_checkable
+class Reconstructable(Protocol):
+    """A component that can supply private constructor inputs."""
+
+    def get_reconstruction_parameters(self) -> dict[str, object]:
+        """Return server-only inputs; these must not be serialized as credentials."""
+        ...
+
+
+@runtime_checkable
+class ReconstructionContext(Protocol):
+    """A component that shares source-owned operational context."""
+
+    def attach_reconstruction_source(self, source: object) -> None:
+        """Attach context without changing the source's behavioral settings."""
+        ...
+
+
 T = TypeVar("T")
+InstanceT = TypeVar("InstanceT", bound="Identifiable")
 MetadataT = TypeVar("MetadataT", bound=RegistryMetadata)
 ConfigurableT = TypeVar("ConfigurableT", bound="SupportsParamBag")
 
@@ -170,6 +192,13 @@ class Registry(ABC, Generic[T, MetadataT]):
 
     # Class-level singleton instances, keyed by registry class.
     _singletons: dict[type, Registry[Any, Any]] = {}
+    # Guards only the two class-level dicts below (fast dict lookups); it is never held
+    # while a registry class is being constructed, so unrelated registry classes never
+    # queue behind one another's constructor.
+    _singletons_lock = threading.RLock()
+    # Per-registry-class construction locks, so concurrent same-class callers converge
+    # onto a single construction while different registry classes construct independently.
+    _singleton_construction_locks: dict[type, threading.Lock] = {}
 
     def __init__(self, *, lazy_discovery: bool = True) -> None:
         """
@@ -179,8 +208,16 @@ class Registry(ABC, Generic[T, MetadataT]):
             lazy_discovery (bool): If True, discovery is deferred until first access.
                 If False, discovery runs immediately in the constructor.
         """
+        self._catalog_lock = threading.RLock()
+        # Guards the (potentially slow) metadata build so concurrent callers single-flight
+        # onto one build instead of each redoing it; never held while _catalog_lock is held,
+        # so catalog reads (__contains__, get_class, ...) are never parked behind a build.
+        self._metadata_build_lock = threading.RLock()
         self._classes: dict[str, type[T]] = {}
         self._metadata_cache: dict[str, MetadataT] | None = None
+        # Bumped on every catalog mutation so an in-flight metadata build can detect a
+        # registration that landed mid-build and retry instead of caching a stale snapshot.
+        self._catalog_version = 0
         self._discovered = False
         self._lazy_discovery = lazy_discovery
 
@@ -193,14 +230,30 @@ class Registry(ABC, Generic[T, MetadataT]):
         """
         Get the singleton instance of this registry.
 
-        Creates the instance on first call with default parameters.
+        Creates the instance on first call with default parameters. Construction
+        happens under a per-class lock rather than the shared map lock, so a slow
+        eager constructor (e.g. one that runs discovery synchronously) blocks only
+        other callers of the *same* registry class; unrelated registry classes
+        construct independently.
 
         Returns:
             The singleton instance of this registry class.
         """
-        if cls not in cls._singletons:
-            cls._singletons[cls] = cls()
-        return cls._singletons[cls]  # type: ignore[ty:invalid-return-type]
+        with cls._singletons_lock:
+            instance = cls._singletons.get(cls)
+            if instance is not None:
+                return instance  # type: ignore[ty:invalid-return-type]
+            construction_lock = cls._singleton_construction_locks.setdefault(cls, threading.Lock())
+
+        with construction_lock:
+            with cls._singletons_lock:
+                instance = cls._singletons.get(cls)
+                if instance is not None:
+                    return instance  # type: ignore[ty:invalid-return-type]
+            instance = cls()
+            with cls._singletons_lock:
+                cls._singletons[cls] = instance
+            return instance  # type: ignore[ty:invalid-return-type]
 
     @classmethod
     def reset_registry_singleton(cls) -> None:
@@ -209,14 +262,29 @@ class Registry(ABC, Generic[T, MetadataT]):
 
         Useful for testing or when re-discovery is needed.
         """
-        if cls in cls._singletons:
-            del cls._singletons[cls]
+        with cls._singletons_lock:
+            if cls in cls._singletons:
+                del cls._singletons[cls]
+
+    @classmethod
+    def set_registry_singleton(cls, instance: Self) -> None:
+        """
+        Replace this registry's singleton with an already constructed instance.
+
+        Raises:
+            TypeError: If the instance is not an instance of this registry class.
+        """
+        if not isinstance(instance, cls):
+            raise TypeError(f"Expected {cls.__name__}, got {type(instance).__name__}.")
+        with cls._singletons_lock:
+            cls._singletons[cls] = instance
 
     def _ensure_discovered(self) -> None:
         """Ensure discovery has been performed. Runs discovery on first access."""
-        if not self._discovered:
-            self._discover()
-            self._discovered = True
+        with self._catalog_lock:
+            if not self._discovered:
+                self._discover()
+                self._discovered = True
 
     def _base_type(self) -> type[T]:
         """
@@ -254,6 +322,18 @@ class Registry(ABC, Generic[T, MetadataT]):
             f"{type(self).__name__} must implement _base_type()/_discovery_package() or override _discover()."
         )
 
+    def _should_register_discovered_class(self, cls: type[T]) -> bool:
+        """
+        Determine whether a concrete subclass belongs in this registry.
+
+        Args:
+            cls (type[T]): The discovered concrete subclass.
+
+        Returns:
+            bool: True when the class belongs in the buildable catalog.
+        """
+        return True
+
     def _discover(self) -> None:
         """
         Populate the catalog with every concrete subclass of the domain base.
@@ -286,6 +366,9 @@ class Registry(ABC, Generic[T, MetadataT]):
         for cls in self._iter_concrete_subclasses(base):
             module = cls.__module__ or ""
             if module != package_name and not module.startswith(package_prefix):
+                continue
+            if not self._should_register_discovered_class(cls):
+                logger.debug(f"Skipping non-buildable class: {cls.__name__}")
                 continue
             if (cls.__doc__ or "").strip().startswith("Deprecated alias"):
                 logger.debug(f"Skipping deprecated alias: {cls.__name__}")
@@ -377,7 +460,13 @@ class Registry(ABC, Generic[T, MetadataT]):
         Returns:
             tuple[Parameter, ...]: The derived build contract.
         """
-        return tuple(derive_parameters(cls=cls, identifier_type=self._identifier_type()))
+        return tuple(
+            derive_parameters(
+                cls=cls,
+                identifier_type=self._identifier_type(),
+                seam_base_type=self._seam_base_type(),
+            )
+        )
 
     def _class_attributes(self, cls: type[T]) -> Mapping[str, Any]:
         """
@@ -406,6 +495,23 @@ class Registry(ABC, Generic[T, MetadataT]):
 
         Returns:
             type[ComponentIdentifier] | None: The domain identifier type, or None.
+        """
+        return None
+
+    def _seam_base_type(self) -> type[T] | None:
+        """
+        Return the domain base type whose non-required reference parameters are construction seams.
+
+        A base can declare a non-required registry reference that it only validates
+        and discards, so subclasses share one construction path for forwarding that
+        value (e.g. ``Converter.converter_target``). Such a parameter is not a
+        build input of a subclass that does not declare it itself, so the derived
+        contract, the metadata, and ``create_instance`` exclude it (see
+        ``resolution.derive_parameters``). A required reference the base declares
+        is kept: the base's own construction needs it supplied.
+
+        Returns:
+            type[T] | None: The seam base type, or None when this registry has none.
         """
         return None
 
@@ -490,11 +596,13 @@ class Registry(ABC, Generic[T, MetadataT]):
         Raises:
             ValueError: If the class fails validation.
         """
-        if name is None:
-            name = self._get_registry_name(cls)
-        self._validate_class(cls)
-        self._classes[name] = cls
-        self._metadata_cache = None
+        with self._catalog_lock:
+            if name is None:
+                name = self._get_registry_name(cls)
+            self._validate_class(cls)
+            self._classes[name] = cls
+            self._metadata_cache = None
+            self._catalog_version += 1
 
     def get_class(self, name: str) -> type[T]:
         """
@@ -509,12 +617,13 @@ class Registry(ABC, Generic[T, MetadataT]):
         Raises:
             KeyError: If the name is not registered.
         """
-        self._ensure_discovered()
-        cls = self._classes.get(name)
-        if cls is None:
-            available = ", ".join(self.get_class_names())
-            raise KeyError(f"'{name}' not found in registry. Available: {available}")
-        return cls
+        with self._catalog_lock:
+            self._ensure_discovered()
+            cls = self._classes.get(name)
+            if cls is None:
+                available = ", ".join(self.get_class_names())
+                raise KeyError(f"'{name}' not found in registry. Available: {available}")
+            return cls
 
     def get_class_names(self) -> list[str]:
         """
@@ -523,22 +632,48 @@ class Registry(ABC, Generic[T, MetadataT]):
         Returns:
             list[str]: Sorted catalog names.
         """
-        self._ensure_discovered()
-        return sorted(self._classes.keys())
+        with self._catalog_lock:
+            self._ensure_discovered()
+            return sorted(self._classes.keys())
 
     def _ensure_metadata(self) -> dict[str, MetadataT]:
         """
         Build (once) and return the metadata cache keyed by catalog name.
 
+        Building metadata re-derives every registered class's build contract (the
+        same introspection cost as discovery) and can take a while for a large
+        catalog. That work runs with ``_catalog_lock`` released so it never parks
+        concurrent catalog reads (``__contains__``, ``get_class``, ...) — those
+        only need the lock for a quick dict lookup. ``_metadata_build_lock`` still
+        makes concurrent metadata callers single-flight onto one build, and the
+        ``_catalog_version`` stamp detects a registration that lands mid-build so a
+        stale snapshot is never cached over a newer one; the build simply retries.
+
         Returns:
             dict[str, MetadataT]: Metadata for every registered class, keyed by name.
         """
-        self._ensure_discovered()
-        if self._metadata_cache is None:
-            self._metadata_cache = {
-                name: self._build_metadata(name, cls) for name, cls in sorted(self._classes.items())
-            }
-        return self._metadata_cache
+        with self._catalog_lock:
+            self._ensure_discovered()
+            if self._metadata_cache is not None:
+                return self._metadata_cache
+
+        with self._metadata_build_lock:
+            while True:
+                with self._catalog_lock:
+                    if self._metadata_cache is not None:
+                        return self._metadata_cache
+                    classes_snapshot = dict(self._classes)
+                    version = self._catalog_version
+
+                built = {name: self._build_metadata(name, cls) for name, cls in sorted(classes_snapshot.items())}
+
+                with self._catalog_lock:
+                    if self._metadata_cache is not None:
+                        return self._metadata_cache
+                    if self._catalog_version == version:
+                        self._metadata_cache = built
+                        return self._metadata_cache
+                    # A registration landed mid-build; retry with a fresh snapshot.
 
     def get_all_registered_class_metadata(
         self,
@@ -624,6 +759,39 @@ class Registry(ABC, Generic[T, MetadataT]):
             cls=cls,
             raw_args=dict(kwargs),
             identifier_type=self._identifier_type(),
+            seam_base_type=self._seam_base_type(),
+        )
+        return cls(**resolved)
+
+    def create_instance_from_external_input(self, name: str, *, params: Mapping[str, object]) -> T:
+        """
+        Build a configured instance from external input such as a REST or CLI request.
+
+        Unlike ``create_instance``, which serves in-process callers that may pass any
+        Python object, this accepts only parameters with ``Parameter.is_external_input``
+        and registry references given by name. Anything else is rejected before
+        construction; the constructor still validates the values it receives.
+
+        Args:
+            name (str): The catalog name to build.
+            params (Mapping[str, object]): Constructor arguments from the external caller.
+
+        Returns:
+            T: The constructed instance.
+
+        Raises:
+            KeyError: If the name is not registered.
+            ValueError: If an argument is not a valid constructor parameter or not an
+                external input, a registry reference cannot be resolved, or a value
+                cannot be coerced.
+        """
+        cls = self.get_class(name)
+        resolved = resolve_constructor_args(
+            cls=cls,
+            raw_args=dict(params),
+            identifier_type=self._identifier_type(),
+            external_input=True,
+            seam_base_type=self._seam_base_type(),
         )
         return cls(**resolved)
 
@@ -634,8 +802,9 @@ class Registry(ABC, Generic[T, MetadataT]):
         Returns:
             bool: True if the name is registered, False otherwise.
         """
-        self._ensure_discovered()
-        return name in self._classes
+        with self._catalog_lock:
+            self._ensure_discovered()
+            return name in self._classes
 
     def __len__(self) -> int:
         """
@@ -644,8 +813,9 @@ class Registry(ABC, Generic[T, MetadataT]):
         Returns:
             int: The number of registered classes.
         """
-        self._ensure_discovered()
-        return len(self._classes)
+        with self._catalog_lock:
+            self._ensure_discovered()
+            return len(self._classes)
 
     def __iter__(self) -> Iterator[str]:
         """
@@ -655,6 +825,191 @@ class Registry(ABC, Generic[T, MetadataT]):
             Iterator[str]: An iterator over sorted registered names.
         """
         return iter(self.get_class_names())
+
+
+class InstanceHoldingRegistry(Registry[InstanceT, MetadataT]):
+    """
+    Registry that builds classes and stores named, configured instances.
+
+    Extends the class-catalog and construction behavior of ``Registry`` with a
+    typed ``instances`` container. This keeps construction on the owning component
+    registry while ``InstanceRegistry`` remains responsible only for storing and
+    retrieving already-built objects.
+
+    Type Parameters:
+        InstanceT: The identifiable component type that this registry builds and stores.
+        MetadataT: The metadata dataclass for buildable classes.
+    """
+
+    def __init__(
+        self,
+        *,
+        lazy_discovery: bool = True,
+        reserved_instance_names: set[str] | frozenset[str] | None = None,
+    ) -> None:
+        """
+        Initialize the class catalog and typed instance container.
+
+        Args:
+            lazy_discovery (bool): If True, class discovery is deferred until first
+                access. If False, discovery runs immediately.
+            reserved_instance_names (set[str] | frozenset[str] | None): Names that
+                cannot be used for stored instances.
+        """
+        super().__init__(lazy_discovery=lazy_discovery)
+        self.instances: InstanceRegistry[InstanceT] = DefaultInstanceRegistry(
+            instance_type=self._base_type,
+            reserved_names=reserved_instance_names,
+        )
+
+    def create_named_instance(
+        self,
+        *,
+        name: str,
+        type_name: str,
+        params: Mapping[str, object] | None = None,
+        registry_metadata: dict[str, Any] | None = None,
+        external_input: bool = False,
+    ) -> InstanceT:
+        """
+        Build and store a configured instance under an explicit name.
+
+        Args:
+            name (str): The unique instance name.
+            type_name (str): The registered class name to build.
+            params (Mapping[str, object] | None): Constructor arguments.
+            registry_metadata (dict[str, Any] | None): Per-entry metadata to store
+                with the instance.
+            external_input (bool): Whether ``params`` come from an external caller, in which
+                case the instance is built with ``create_instance_from_external_input``.
+                Defaults to False.
+
+        Returns:
+            InstanceT: The constructed and registered instance.
+        """
+        self.instances.validate_name_available(name)
+        args = dict(params) if params is not None else {}
+        instance = (
+            self.create_instance_from_external_input(type_name, params=args)
+            if external_input
+            else self.create_instance(type_name, **args)
+        )
+        self.instances.register(instance, name=name, metadata=registry_metadata)
+        return instance
+
+    def resolve_source(self, *, name: str, identifier_hash: str) -> InstanceT:
+        """
+        Resolve an unchanged source, allowing only an unambiguous rename.
+
+        Returns:
+            InstanceT: The matching registered source.
+
+        Raises:
+            ValueError: If the source is missing, changed, or ambiguous.
+        """
+        source = self.instances.get(name)
+        if source is not None:
+            if source.get_identifier().hash != identifier_hash:
+                raise ValueError(f"Source instance '{name}' has changed")
+            return source
+        matches = [
+            entry.instance
+            for entry in self.instances.get_all_instances()
+            if entry.instance.get_identifier().hash == identifier_hash
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"Source instance '{name}' is missing or ambiguous")
+        return matches[0]
+
+    def get_reconstruction_parameters(self, source: InstanceT) -> dict[str, object]:
+        """
+        Select declared constructor inputs from an opt-in source.
+
+        Returns:
+            dict[str, object]: Independent input containers with shared live dependencies.
+
+        Raises:
+            ValueError: If the source does not support reconstruction.
+        """
+        if not isinstance(source, Reconstructable):
+            raise ValueError(f"{type(source).__name__} does not support reconstruction")
+        inputs = source.get_reconstruction_parameters()
+        parameters = derive_parameters(
+            cls=type(source),
+            identifier_type=self._identifier_type(),
+            seam_base_type=self._seam_base_type(),
+        )
+        retained = getattr(source, "_reconstruction_parameters", {})
+        unsupported = set(retained) - {parameter.name for parameter in parameters}
+        if unsupported:
+            raise ValueError(f"The source uses undeclared constructor inputs: {', '.join(sorted(unsupported))}")
+        from pyrit.common.constructor_capture import copy_constructor_inputs
+
+        return {
+            parameter.name: copy_constructor_inputs(inputs[parameter.name])
+            for parameter in parameters
+            if parameter.name in inputs
+        }
+
+    def recreate_instance(
+        self, *, source: InstanceT, params: Mapping[str, object], external_input: bool = False
+    ) -> InstanceT:
+        """
+        Build an independent component; never change or register the source.
+
+        Returns:
+            InstanceT: The new component, owned by the caller.
+
+        Raises:
+            ValueError: If overrides are unknown or the source class is unavailable.
+        """
+        inputs = self.get_reconstruction_parameters(source)
+        raw_params = dict(params)
+        parameters = derive_parameters(
+            cls=type(source),
+            identifier_type=self._identifier_type(),
+            seam_base_type=self._seam_base_type(),
+        )
+        by_name = {parameter.name: parameter for parameter in parameters}
+        unknown = set(raw_params) - set(by_name)
+        if unknown:
+            raise ValueError(f"Unknown constructor parameters: {', '.join(sorted(unknown))}")
+        # An empty string is a cleared reference, not a value to look up. Resolving
+        # would drop the key, which lets the source input reappear in the merge
+        # below; remove it from the retained inputs so the constructor default
+        # (including an apply_defaults-registered one) applies instead.
+        cleared = {name for name, value in raw_params.items() if value == "" and by_name[name].reference is not None}
+        if cleared:
+            inputs = {name: value for name, value in inputs.items() if name not in cleared}
+        if external_input:
+            raw_params = resolve_constructor_args(
+                cls=type(source),
+                raw_args=raw_params,
+                identifier_type=self._identifier_type(),
+                external_input=True,
+                seam_base_type=self._seam_base_type(),
+            )
+            from pyrit.models import SeedPrompt
+
+            for name, value in raw_params.items():
+                source_prompt = inputs.get(name)
+                if (
+                    isinstance(params.get(name), str)
+                    and isinstance(source_prompt, SeedPrompt)
+                    and isinstance(value, SeedPrompt)
+                ):
+                    raw_params[name] = source_prompt.model_copy(
+                        update={"value": value.value, "is_jinja_template": True, "parameters": value.parameters}
+                    )
+        with self._catalog_lock:
+            self._ensure_discovered()
+            names = sorted(name for name, cls in self._classes.items() if cls is type(source))
+        if not names:
+            raise ValueError("The source component's class is no longer registered")
+        instance = self.create_instance(names[0], **{**inputs, **raw_params})
+        if isinstance(instance, ReconstructionContext):
+            instance.attach_reconstruction_source(source)
+        return instance
 
 
 class ParamBagRegistry(Registry[ConfigurableT, MetadataT]):

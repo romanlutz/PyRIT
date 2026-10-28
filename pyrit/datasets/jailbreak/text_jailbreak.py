@@ -48,11 +48,9 @@ class TextJailBreak:
         Returns:
             dict[str, list[Path]]: Cached mapping of filename to list of matching paths.
         """
-        if cls._template_cache is None:
-            with cls._cache_lock:
-                # Double-checked locking: re-test after acquiring the lock
-                if cls._template_cache is None:
-                    cls._template_cache = cls._scan_template_files()
+        with cls._cache_lock:
+            if cls._template_cache is None:
+                cls._template_cache = cls._scan_template_files()
         return cls._template_cache
 
     @classmethod
@@ -213,20 +211,24 @@ class TextJailBreak:
         Retrieve all jailbreaks from the JAILBREAK_TEMPLATES_PATH.
 
         Args:
-            num_templates (int, optional): Number of jailbreak templates to return. None to get all.
+            num_templates (int | None): Number of jailbreak templates to return. None to get all.
 
         Returns:
             list[str]: List of jailbreak template file names.
 
         Raises:
+            ValueError: If ``num_templates`` is provided and is less than 1.
             ValueError: If no jailbreak templates are found in the jailbreak directory.
             ValueError: If n is larger than the number of templates that exist.
         """
+        if num_templates is not None and num_templates < 1:
+            raise ValueError("num_templates must be at least 1")
+
         jailbreak_template_names = sorted(cls._get_template_cache().keys())
         if not jailbreak_template_names:
             raise ValueError("No jailbreak templates found in the jailbreak directory")
 
-        if num_templates:
+        if num_templates is not None:
             if num_templates > len(jailbreak_template_names):
                 raise ValueError(
                     f"Attempted to pull {num_templates} jailbreaks from a dataset"

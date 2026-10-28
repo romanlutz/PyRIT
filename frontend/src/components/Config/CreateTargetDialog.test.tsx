@@ -1,7 +1,8 @@
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { act, render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FluentProvider, webLightTheme } from "@fluentui/react-components";
 import { makeTarget } from "@/test-utils/targetFixtures";
+import type { Parameter, TargetTypeListResponse } from "@/types";
 import CreateTargetDialog from "./CreateTargetDialog";
 import { parseWeight, MAX_WEIGHT } from "./weightValidation";
 import { targetsApi } from "@/services/api";
@@ -9,38 +10,424 @@ import { targetsApi } from "@/services/api";
 jest.mock("@/services/api", () => ({
   targetsApi: {
     createTarget: jest.fn(),
-    listTargetCatalog: jest.fn(),
+    listTargetTypes: jest.fn(),
     listTargets: jest.fn(),
   },
 }));
 
 const mockedTargetsApi = targetsApi as jest.Mocked<typeof targetsApi>;
 
-// Representative target catalog covering the types the dialog renders. Mirrors
-// the shape returned by GET /targets/catalog.
-const TARGET_CATALOG = {
+const OPENAI_COMMON_PARAMETERS: Parameter[] = [
+  {
+    name: "model_name",
+    type_name: "str",
+    required: false,
+    default: null,
+    description: "The model or deployment name.",
+  },
+  {
+    name: "endpoint",
+    type_name: "str",
+    required: false,
+    default: null,
+    description: "The target URL for the OpenAI service.",
+  },
+  {
+    name: "api_key",
+    type_name: "str | Callable",
+    required: false,
+    default: null,
+    description: "The API key for accessing the OpenAI service.",
+  },
+  {
+    name: "underlying_model",
+    type_name: "str",
+    required: false,
+    default: null,
+    description: "The underlying model name used for identification.",
+  },
+];
+
+const AZURE_ML_COMMON_PARAMETERS: Parameter[] = [
+  {
+    name: "endpoint",
+    type_name: "str",
+    required: false,
+    default: null,
+    description: "The endpoint URL for the deployed Azure ML model.",
+  },
+  {
+    name: "api_key",
+    type_name: "str | Callable",
+    required: false,
+    default: null,
+    description: "The API key for accessing the Azure ML endpoint.",
+  },
+  {
+    name: "model_name",
+    type_name: "str",
+    required: false,
+    default: "",
+    description: "The name of the deployed model.",
+  },
+];
+
+const TARGET_TYPES: TargetTypeListResponse = {
   items: [
-    { target_type: "OpenAIChatTarget", parameters: [], supported_auth_modes: ["api_key", "identity"] },
-    { target_type: "OpenAIResponseTarget", parameters: [], supported_auth_modes: ["api_key", "identity"] },
-    { target_type: "AzureMLChatTarget", parameters: [], supported_auth_modes: ["api_key", "identity"] },
-    { target_type: "RoundRobinTarget", parameters: [], supported_auth_modes: ["api_key"] },
+    {
+      target_type: "GitHubCopilotTarget",
+      parameters: [
+        {
+          name: "model_name",
+          type_name: "str",
+          required: true,
+          default: null,
+          description: "Explicit Copilot model ID.",
+        },
+        {
+          name: "github_token",
+          type_name: "str",
+          required: false,
+          default: null,
+          sensitive: true,
+          description: "Required unless GITHUB_TOKEN is configured for this CoPyRIT instance through its environment or loaded .env/.env.local files.",
+        },
+        {
+          name: "working_directory",
+          type_name: "str | Path",
+          required: false,
+          default: null,
+          description: "Existing local directory on the server.",
+        },
+        {
+          name: "retain_session",
+          type_name: "bool",
+          required: false,
+          default: "False",
+          description: "Keep Copilot sessions on disk.",
+        },
+        {
+          name: "response_timeout_seconds",
+          type_name: "float",
+          required: false,
+          default: "60.0",
+          description: "Response time budget in seconds.",
+        },
+        {
+          name: "max_requests_per_minute",
+          type_name: "int",
+          required: false,
+          default: null,
+          description: "Per-send pacing.",
+        },
+      ],
+      supported_auth_modes: ["api_key"],
+      description: "Send text requests through the GitHub Copilot SDK.",
+    },
+    {
+      target_type: "AzureMLChatTarget",
+      parameters: [
+        ...AZURE_ML_COMMON_PARAMETERS,
+        {
+          name: "max_new_tokens",
+          type_name: "int",
+          required: false,
+          default: "400",
+          description: "The maximum number of tokens to generate in the response.",
+        },
+        {
+          name: "temperature",
+          type_name: "float",
+          required: false,
+          default: "1.0",
+          description: "The temperature for generating diverse responses.",
+        },
+        {
+          name: "top_p",
+          type_name: "float",
+          required: false,
+          default: "1.0",
+          description: "The top-p value for generating diverse responses.",
+        },
+        {
+          name: "repetition_penalty",
+          type_name: "float",
+          required: false,
+          default: "1.0",
+          description: "The repetition penalty for generated responses.",
+        },
+      ],
+      supported_auth_modes: ["api_key", "identity"],
+      description: "A prompt target for Azure Machine Learning chat endpoints.",
+    },
+    {
+      target_type: "OpenAIChatTarget",
+      parameters: [
+        {
+          name: "temperature",
+          type_name: "float",
+          required: false,
+          default: null,
+          description: "Controls the randomness of the response.",
+        },
+        {
+          name: "top_p",
+          type_name: "float",
+          required: false,
+          default: null,
+          description: "Controls the diversity of the response.",
+        },
+        {
+          name: "seed",
+          type_name: "int",
+          required: false,
+          default: null,
+          description: "Makes a best effort to sample deterministically.",
+        },
+        {
+          name: "extra_body_parameters",
+          type_name: "dict[str, typing.Any]",
+          required: false,
+          default: null,
+          description: "Additional parameters to include in the request body.",
+        },
+        {
+          name: "httpx_client_kwargs",
+          type_name: "dict[str, typing.Any]",
+          required: false,
+          default: null,
+          description: "Additional parameters for the HTTP client.",
+        },
+        ...OPENAI_COMMON_PARAMETERS,
+      ],
+      supported_auth_modes: ["api_key", "identity"],
+      description: "Facilitates multimodal (image and text) input and text output generation.",
+    },
+    {
+      target_type: "OpenAICompletionTarget",
+      parameters: [
+        {
+          name: "stop",
+          type_name: "list[str]",
+          required: false,
+          default: null,
+          is_list: true,
+          description: "Sequences where generation should stop.",
+        },
+        ...OPENAI_COMMON_PARAMETERS,
+      ],
+      supported_auth_modes: ["api_key", "identity"],
+      description: "A prompt target for OpenAI completion endpoints.",
+    },
+    {
+      target_type: "OpenAIImageTarget",
+      parameters: OPENAI_COMMON_PARAMETERS,
+      supported_auth_modes: ["api_key", "identity"],
+      description: "A target for image generation or editing using OpenAI's image models.",
+    },
+    {
+      target_type: "OpenAIResponseTarget",
+      parameters: [
+        {
+          name: "reasoning_effort",
+          type_name: "str",
+          required: false,
+          default: null,
+          choices: ["none", "minimal", "low", "medium", "high", "xhigh"],
+          description: "Controls how much reasoning the model performs.",
+        },
+        {
+          name: "fail_on_missing_function",
+          type_name: "bool",
+          required: false,
+          default: "False",
+          description: "Raise when the response calls an unknown function.",
+        },
+        {
+          name: "custom_functions",
+          type_name: "dict[str, collections.abc.Callable]",
+          required: false,
+          default: null,
+          description: "Mapping of user-defined function names.",
+        },
+        ...OPENAI_COMMON_PARAMETERS,
+      ],
+      supported_auth_modes: ["api_key", "identity"],
+      description: "Enables communication with endpoints that support the OpenAI Response API.",
+    },
+    {
+      target_type: "OpenAITTSTarget",
+      parameters: OPENAI_COMMON_PARAMETERS,
+      supported_auth_modes: ["api_key", "identity"],
+      description: "A prompt target for OpenAI Text-to-Speech (TTS) endpoints.",
+    },
+    {
+      target_type: "OpenAIVideoTarget",
+      parameters: OPENAI_COMMON_PARAMETERS,
+      supported_auth_modes: ["api_key", "identity"],
+      description: "OpenAI Video Target using the OpenAI SDK for video generation.",
+    },
+    {
+      target_type: "RoundRobinTarget",
+      parameters: [],
+      supported_auth_modes: ["api_key"],
+      description: "A prompt target that distributes requests across multiple inner targets using weighted round-robin selection.",
+    },
+    {
+      target_type: "HTTPTarget",
+      parameters: [
+        {
+          name: "http_request",
+          type_name: "str",
+          required: true,
+          default: null,
+          multiline: true,
+          description: "The HTTP request template containing the prompt placeholder.",
+        },
+        {
+          name: "use_tls",
+          type_name: "bool",
+          required: false,
+          default: "True",
+          description: "Whether to use TLS.",
+        },
+      ],
+      supported_auth_modes: ["api_key"],
+      description: "Sends prompts through a raw HTTP request template.",
+    },
+    {
+      target_type: "AzureBlobStorageTarget",
+      parameters: [
+        {
+          name: "storage_url",
+          type_name: "str",
+          required: false,
+          default: null,
+          description: "The Azure Blob Storage service URL.",
+        },
+        {
+          name: "sas_token",
+          type_name: "str",
+          required: false,
+          default: null,
+          sensitive: true,
+          identity_conflicting: true,
+          description: "The optional shared access signature.",
+        },
+      ],
+      supported_auth_modes: ["api_key", "identity"],
+      description: "Stores prompts and responses in Azure Blob Storage.",
+    },
+    {
+      target_type: "PlaywrightTarget",
+      parameters: [
+        {
+          name: "interaction_func",
+          type_name: "InteractionFunction",
+          required: true,
+          default: null,
+          description: "The Python function used to interact with the page.",
+        },
+      ],
+      supported_auth_modes: ["api_key"],
+      description: "Uses Playwright to interact with a web UI.",
+    },
   ],
+};
+
+const TARGET_DISPLAY_NAMES: Record<string, string> = {
+  AzureMLChatTarget: "Azure Machine Learning chat",
+  GitHubCopilotTarget: "GitHub Copilot",
+  OpenAIChatTarget: "OpenAI chat",
+  OpenAICompletionTarget: "OpenAI text completion",
+  OpenAIImageTarget: "OpenAI image",
+  OpenAIResponseTarget: "OpenAI Responses API",
+  OpenAITTSTarget: "OpenAI text to speech",
+  OpenAIVideoTarget: "OpenAI video",
+  RoundRobinTarget: "Weighted round robin",
+  HTTPTarget: "HTTPTarget",
+  AzureBlobStorageTarget: "AzureBlobStorageTarget",
 };
 
 const TestWrapper: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => <FluentProvider theme={webLightTheme}>{children}</FluentProvider>;
 
-/**
- * Helper to select a target type from the native select element.
- * Uses selectOptions from userEvent which works with native select.
- */
-async function selectTargetType(
-  user: ReturnType<typeof userEvent.setup>,
-  value: string
-) {
-  const select = screen.getByRole("combobox");
-  await user.selectOptions(select, value);
+// Fluent's Dropdown renders its listbox in a portal guarded by a focus
+// modalizer. Under jsdom the popover only toggles via a direct click event,
+// and the `aria-hidden` the modalizer puts on the dialog while the listbox is
+// open is not reliably restored once it closes, which would hide the rest of
+// the form from role-based queries. Both behaviors are jsdom artifacts — real
+// pointer and keyboard interaction is covered by e2e/config.spec.ts.
+async function openTargetTypePicker(): Promise<HTMLElement> {
+  const picker = screen.getByRole("combobox", { name: /target type/i });
+  await waitFor(() => {
+    expect(picker).toBeEnabled();
+  });
+  fireEvent.click(picker);
+  await screen.findByRole("listbox");
+  return picker;
+}
+
+// Drops the leftover `aria-hidden` from the dialog and everything above it.
+// It is a no-op while a listbox is open, so the modalizer keeps its real
+// behavior and only the missing restore is compensated for.
+function restoreDialogAccessibility(): void {
+  const dialog = document.querySelector('[role="dialog"]');
+  if (!dialog) return;
+  if (document.querySelector('[role="listbox"]')) return;
+  const hiddenAncestors = document.querySelectorAll('[aria-hidden="true"]');
+  for (const element of Array.from(hiddenAncestors)) {
+    if (element === dialog || element.contains(dialog)) {
+      element.removeAttribute("aria-hidden");
+    }
+  }
+}
+
+// The modalizer can re-apply `aria-hidden` well after the listbox closed —
+// on an unrelated focus change, for instance — so a one-shot cleanup leaves
+// every later `*ByRole` query racing against it. Re-run the cleanup whenever
+// the attribute reappears instead.
+function watchDialogAccessibility(): MutationObserver {
+  const observer = new MutationObserver(restoreDialogAccessibility);
+  observer.observe(document.documentElement, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ["aria-hidden"],
+  });
+  return observer;
+}
+
+async function selectTargetType(value: string): Promise<void> {
+  await openTargetTypePicker();
+  fireEvent.click(
+    screen.getByRole("option", {
+      name: new RegExp(`Implementation: ${value}`),
+    }),
+  );
+  await waitFor(() => {
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+  await waitFor(() => {
+    restoreDialogAccessibility();
+    expect(screen.getByRole("combobox", { name: /target type/i })).toHaveTextContent(
+      TARGET_DISPLAY_NAMES[value]
+    );
+  });
+}
+
+// The target type fetch mock (see beforeEach) resolves on mount, and its
+// setTargetTypeEntries/setTypeMetadataStatus updates land on the next microtask
+// tick. Tests that follow up with an `await` (selectTargetType,
+// openTargetTypePicker, userEvent, ...) give React a chance to settle that
+// update inside their own act()-wrapped waiting. Tests that only make
+// synchronous assertions after `render` never yield, so the update fires
+// after the test body returns and React reports it as outside act(...).
+// Call this right after `render` in those synchronous tests to flush it
+// deterministically.
+async function flushTargetTypesFetch(): Promise<void> {
+  await act(async () => {});
 }
 
 describe("parseWeight", () => {
@@ -116,27 +503,169 @@ describe("CreateTargetDialog", () => {
     onCreated: jest.fn(),
   };
 
+  let dialogAccessibilityObserver: MutationObserver;
+
   beforeEach(() => {
+    dialogAccessibilityObserver = watchDialogAccessibility();
     jest.clearAllMocks();
-    mockedTargetsApi.listTargetCatalog.mockResolvedValue(
-      TARGET_CATALOG as unknown as Awaited<ReturnType<typeof mockedTargetsApi.listTargetCatalog>>,
-    );
+    mockedTargetsApi.listTargetTypes.mockResolvedValue(TARGET_TYPES);
     mockedTargetsApi.listTargets.mockResolvedValue({
       items: [],
       pagination: { limit: 200, has_more: false, next_cursor: null, prev_cursor: null },
     } as unknown as Awaited<ReturnType<typeof mockedTargetsApi.listTargets>>);
   });
 
-  it("should render dialog when open", () => {
+  afterEach(() => {
+    dialogAccessibilityObserver.disconnect();
+  });
+
+  it("should render dialog when open", async () => {
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+    await flushTargetTypesFetch();
+
+    expect(screen.getByText("Create New Target")).toBeInTheDocument();
+    expect(screen.getByText("Create Target")).toBeInTheDocument();
+    expect(screen.getByText("Cancel")).toBeInTheDocument();
+  });
+
+  it("should show friendly names, registry descriptions, implementation identifiers, and auth for all target types", async () => {
     render(
       <TestWrapper>
         <CreateTargetDialog {...defaultProps} />
       </TestWrapper>
     );
 
-    expect(screen.getByText("Create New Target")).toBeInTheDocument();
-    expect(screen.getByText("Create Target")).toBeInTheDocument();
-    expect(screen.getByText("Cancel")).toBeInTheDocument();
+    await openTargetTypePicker();
+
+    const options = screen.getAllByRole("option");
+    expect(options).toHaveLength(11);
+    for (const entry of TARGET_TYPES.items.filter((item) => item.target_type !== "PlaywrightTarget")) {
+      const option = screen.getByRole("option", {
+        name: new RegExp(`Implementation: ${entry.target_type}`),
+      });
+      expect(
+        within(option).getAllByText(TARGET_DISPLAY_NAMES[entry.target_type]).length,
+      ).toBeGreaterThan(0);
+      expect(within(option).getByText(entry.target_type, { selector: "code" })).toBeInTheDocument();
+      expect(within(option).getByText(entry.description ?? "")).toBeInTheDocument();
+    }
+
+    expect(within(screen.getByRole("option", {
+      name: /Implementation: OpenAIChatTarget/,
+    })).getByText(/API key or Microsoft Entra ID/)).toBeInTheDocument();
+    expect(within(screen.getByRole("option", {
+      name: /Implementation: RoundRobinTarget/,
+    })).getByText("Supported authentication: API key")).toBeInTheDocument();
+    expect(screen.queryByRole("option", {
+      name: /Implementation: PlaywrightTarget/,
+    })).not.toBeInTheDocument();
+  });
+
+  it("should keep guidance for the selected target visible after the list closes", async () => {
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("RoundRobinTarget");
+
+    expect(screen.getByRole("combobox", { name: /target type/i })).toHaveTextContent(
+      "Weighted round robin",
+    );
+    const selectedDetails = screen.getByRole("region", { name: /selected target details/i });
+    expect(selectedDetails).toHaveTextContent("RoundRobinTarget");
+    expect(selectedDetails).toHaveTextContent("weighted round-robin selection");
+    expect(selectedDetails).toHaveTextContent("Supported authentication: API key");
+  });
+
+  it("should keep the selected target displayed after focus moves to another field", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("OpenAIChatTarget");
+
+    await user.click(
+      screen.getByPlaceholderText("https://your-resource.openai.azure.com/"),
+    );
+    await user.keyboard("https://api.openai.com");
+    restoreDialogAccessibility();
+
+    const picker = screen.getByRole("combobox", { name: /target type/i });
+    expect(picker).toHaveTextContent("OpenAI chat");
+    expect(picker).not.toHaveTextContent("Select a target type");
+  });
+
+  it("should expose fallback target choices while type metadata is loading", async () => {
+    mockedTargetsApi.listTargetTypes.mockReturnValue(
+      new Promise<TargetTypeListResponse>(() => {}),
+    );
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    expect(screen.getByText("Loading target details...")).toBeInTheDocument();
+    await openTargetTypePicker();
+    expect(screen.getAllByRole("option")).toHaveLength(9);
+  });
+
+  it("should preserve a fallback selection when type metadata arrives", async () => {
+    let resolveTargetTypes: ((targetTypes: TargetTypeListResponse) => void) | null = null;
+    mockedTargetsApi.listTargetTypes.mockReturnValue(
+      new Promise<TargetTypeListResponse>((resolve) => {
+        resolveTargetTypes = resolve;
+      }),
+    );
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("OpenAIChatTarget");
+    expect(screen.getByRole("combobox", { name: /target type/i })).toHaveTextContent("OpenAI chat");
+
+    if (resolveTargetTypes === null) {
+      throw new Error("Target type resolver was not initialized");
+    }
+    await act(async () => {
+      resolveTargetTypes(TARGET_TYPES);
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("Loading target details...")).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("combobox", { name: /target type/i })).toHaveTextContent("OpenAI chat");
+  });
+
+  it("should keep all target types selectable and explain when type metadata fails to load", async () => {
+    mockedTargetsApi.listTargetTypes.mockRejectedValueOnce(new Error("registry unavailable"));
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    expect(await screen.findByText(/Target details could not be loaded/)).toBeInTheDocument();
+    await openTargetTypePicker();
+    expect(screen.getAllByRole("option")).toHaveLength(9);
+    expect(screen.getByRole("option", {
+      name: /Azure Machine Learning chat.*Implementation: AzureMLChatTarget/,
+    })).toBeInTheDocument();
   });
 
   it("should not render when closed", () => {
@@ -149,19 +678,19 @@ describe("CreateTargetDialog", () => {
     expect(screen.queryByText("Create New Target")).not.toBeInTheDocument();
   });
 
-  it("should have Create button disabled until type and endpoint filled", () => {
+  it("should have Create button disabled until type and endpoint filled", async () => {
     render(
       <TestWrapper>
         <CreateTargetDialog {...defaultProps} />
       </TestWrapper>
     );
+    await flushTargetTypesFetch();
 
     const createButton = screen.getByText("Create Target");
     expect(createButton.closest("button")).toBeDisabled();
   });
 
   it("should hide the Authentication field until a target type is selected", async () => {
-    const user = userEvent.setup();
 
     render(
       <TestWrapper>
@@ -169,16 +698,16 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    // No type is chosen yet, so authentication option is not visible yet, but plain API Key input is.
+    // No type is chosen yet, so neither authentication nor API-key controls are visible.
     expect(
       screen.queryByRole("radio", { name: /Identity-based/ })
     ).not.toBeInTheDocument();
     expect(
-      screen.getByPlaceholderText("API key (stored in memory only)")
-    ).toBeInTheDocument();
+      screen.queryByPlaceholderText("API key (stored in memory only)")
+    ).not.toBeInTheDocument();
 
     // Selecting an identity-capable type should reveal the Authentication field.
-    await selectTargetType(user, "OpenAIChatTarget");
+    await selectTargetType("OpenAIChatTarget");
     expect(
       screen.getByRole("radio", { name: /Identity-based/ })
     ).toBeInTheDocument();
@@ -214,7 +743,7 @@ describe("CreateTargetDialog", () => {
     );
 
     // Select target type
-    await selectTargetType(user, "OpenAIChatTarget");
+    await selectTargetType("OpenAIChatTarget");
 
     // Fill the endpoint & model names
     const endpointInput = screen.getByPlaceholderText(
@@ -255,7 +784,7 @@ describe("CreateTargetDialog", () => {
     );
 
     // Select target type
-    await selectTargetType(user, "OpenAIChatTarget");
+    await selectTargetType("OpenAIChatTarget");
 
     // Fill endpoint & model names
     const endpointInput = screen.getByPlaceholderText(
@@ -303,7 +832,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "OpenAIChatTarget");
+    await selectTargetType("OpenAIChatTarget");
 
     const endpointInput = screen.getByPlaceholderText(
       "https://your-resource.openai.azure.com/"
@@ -341,7 +870,7 @@ describe("CreateTargetDialog", () => {
     );
 
     // Select target type
-    await selectTargetType(user, "OpenAIChatTarget");
+    await selectTargetType("OpenAIChatTarget");
 
     // Fill endpoint
     const endpointInput = screen.getByPlaceholderText(
@@ -371,7 +900,7 @@ describe("CreateTargetDialog", () => {
     );
 
     // Select target type
-    await selectTargetType(user, "OpenAIChatTarget");
+    await selectTargetType("OpenAIChatTarget");
 
     // Fill endpoint — use fireEvent.change because userEvent.type truncates
     // URLs containing periods in FluentUI Input under jsdom.
@@ -398,24 +927,30 @@ describe("CreateTargetDialog", () => {
     });
   });
 
-  it("should display pyrit_conf hint text", () => {
+  it("should display supported target initializer guidance", async () => {
     render(
       <TestWrapper>
         <CreateTargetDialog {...defaultProps} />
       </TestWrapper>
     );
+    await flushTargetTypesFetch();
 
+    expect(screen.getByText("target", { selector: "code" })).toBeInTheDocument();
     expect(
-      screen.getByText(/auto-populated by adding an initializer/)
+      screen.getByText(/registers available prompt targets from endpoints/i)
     ).toBeInTheDocument();
+    expect(
+      screen.queryByText("airt", { selector: "code" })
+    ).not.toBeInTheDocument();
   });
 
-  it("should render .pyrit_conf_example as an accessible link", () => {
+  it("should render .pyrit_conf_example as an accessible link", async () => {
     render(
       <TestWrapper>
         <CreateTargetDialog {...defaultProps} />
       </TestWrapper>
     );
+    await flushTargetTypesFetch();
 
     const link = screen.getByRole("link", { name: ".pyrit_conf_example" });
     expect(link).toBeInTheDocument();
@@ -423,9 +958,10 @@ describe("CreateTargetDialog", () => {
       "href",
       "https://github.com/microsoft/PyRIT/blob/main/.pyrit_conf_example"
     );
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
   });
 
-  it("should show field validation errors when submitting form without endpoint", async () => {
+  it("should require an endpoint when identity authentication is selected", async () => {
     const user = userEvent.setup();
 
     render(
@@ -434,8 +970,8 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    // Select target type but leave endpoint empty
-    await selectTargetType(user, "OpenAIChatTarget");
+    await selectTargetType("OpenAIChatTarget");
+    await user.click(screen.getByRole("radio", { name: /Identity-based/ }));
 
     // Submit via form (bypass disabled button by submitting the form directly)
     const form = screen.getByText("Create New Target").closest("form") ??
@@ -459,7 +995,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "OpenAIChatTarget");
+    await selectTargetType("OpenAIChatTarget");
 
     const endpointInput = screen.getByPlaceholderText(
       "https://your-resource.openai.azure.com/"
@@ -473,7 +1009,7 @@ describe("CreateTargetDialog", () => {
     });
   });
 
-  it("should create AzureMLChatTarget with AzureML-specific params", async () => {
+  it("should omit untouched AzureML defaults so the constructor owns default behavior", async () => {
     const onCreated = jest.fn();
     const user = userEvent.setup();
     mockedTargetsApi.createTarget.mockResolvedValue(makeTarget({
@@ -488,7 +1024,7 @@ describe("CreateTargetDialog", () => {
     );
 
     // Select AzureMLChatTarget type
-    await selectTargetType(user, "AzureMLChatTarget");
+    await selectTargetType("AzureMLChatTarget");
 
     // Fill endpoint
     const endpointInput = screen.getByPlaceholderText(
@@ -502,7 +1038,7 @@ describe("CreateTargetDialog", () => {
     const modelInput = screen.getByPlaceholderText("e.g. Llama-3.2-3B-Instruct");
     fireEvent.change(modelInput, { target: { value: "Llama-3.2-3B-Instruct" } });
 
-    // Submit (uses defaults for max_new_tokens, temperature, top_p, repetition_penalty)
+    // Submit without overriding the displayed constructor defaults.
     await user.click(screen.getByText("Create Target"));
 
     await waitFor(() => {
@@ -511,18 +1047,13 @@ describe("CreateTargetDialog", () => {
         params: {
           endpoint: "https://my-llama.eastus.inference.ml.azure.com/score",
           model_name: "Llama-3.2-3B-Instruct",
-          max_new_tokens: 400,
-          temperature: 1.0,
-          top_p: 1.0,
-          repetition_penalty: 1.0,
         },
       });
       expect(onCreated).toHaveBeenCalled();
     });
   });
 
-  it("should show AzureML fields and hide OpenAI fields when AzureMLChatTarget selected", async () => {
-    const user = userEvent.setup();
+  it("should show AzureML metadata fields without unrelated OpenAI fields", async () => {
 
     render(
       <TestWrapper>
@@ -530,7 +1061,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "AzureMLChatTarget");
+    await selectTargetType("AzureMLChatTarget");
 
     // AzureML-specific fields should be visible
     expect(screen.getByText("Max New Tokens")).toBeInTheDocument();
@@ -538,8 +1069,27 @@ describe("CreateTargetDialog", () => {
     expect(screen.getByText("Top P")).toBeInTheDocument();
     expect(screen.getByText("Repetition Penalty")).toBeInTheDocument();
 
-    // OpenAI-specific fields should NOT be visible, but underlying model switch should be
-    expect(screen.getByRole("switch")).toBeInTheDocument();
+    // Azure ML does not declare an underlying-model constructor parameter.
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  });
+
+  it("should show constructor defaults as editable guidance without setting the values", async () => {
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("AzureMLChatTarget");
+
+    const maxNewTokens = screen.getByLabelText("Max New Tokens");
+    expect(maxNewTokens).toHaveValue(null);
+    expect(maxNewTokens).toHaveAttribute("placeholder", "Defaults to 400");
+    expect(screen.getByText(/maximum number of tokens.*Defaults to 400\./i)).toBeInTheDocument();
+
+    const repetitionPenalty = screen.getByLabelText("Repetition Penalty");
+    expect(repetitionPenalty).toHaveValue(null);
+    expect(repetitionPenalty).toHaveAttribute("placeholder", "Defaults to 1.0");
   });
 
   it("should send custom AzureML params when fields are modified", async () => {
@@ -556,7 +1106,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "AzureMLChatTarget");
+    await selectTargetType("AzureMLChatTarget");
 
     // Fill endpoint — use fireEvent.change because userEvent.type truncates
     // URLs containing periods in FluentUI Input under jsdom.
@@ -599,6 +1149,616 @@ describe("CreateTargetDialog", () => {
     });
   });
 
+  it("should render and submit OpenAI numeric parameters from target metadata", async () => {
+    const user = userEvent.setup();
+    mockedTargetsApi.createTarget.mockResolvedValue(makeTarget({
+      target_registry_name: "openai_chat_custom",
+      target_type: "OpenAIChatTarget",
+    }));
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("OpenAIChatTarget");
+    await user.click(screen.getByText("Advanced settings"));
+
+    fireEvent.change(screen.getByPlaceholderText("https://your-resource.openai.azure.com/"), {
+      target: { value: "https://api.openai.com" },
+    });
+    fireEvent.change(screen.getByLabelText("Temperature"), {
+      target: { value: "0" },
+    });
+    fireEvent.change(screen.getByLabelText("Seed"), {
+      target: { value: "42" },
+    });
+
+    expect(screen.getByLabelText("Extra Body Parameters")).toBeVisible();
+
+    await user.click(screen.getByText("Create Target"));
+
+    await waitFor(() => {
+      expect(mockedTargetsApi.createTarget).toHaveBeenCalledWith({
+        type: "OpenAIChatTarget",
+        params: {
+          endpoint: "https://api.openai.com",
+          temperature: 0,
+          seed: 42,
+        },
+      });
+    });
+  });
+
+  it("should submit the catalog video duration as a number", async () => {
+    const user = userEvent.setup();
+    const videoParameters: Parameter[] = [
+      {
+        name: "resolution_dimensions",
+        type_name: "str",
+        is_list: false,
+        choices: ["720x1280", "1280x720", "1024x1792", "1792x1024"],
+        default: "1280x720",
+        required: false,
+      },
+      { name: "n_seconds", type_name: "int", is_list: false, choices: null, default: "4", required: false },
+      { name: "model_name", type_name: "str", is_list: false, choices: null, default: null, required: true },
+      { name: "endpoint", type_name: "str", is_list: false, choices: null, default: null, required: true },
+      { name: "api_key", type_name: "str", is_list: false, choices: null, default: null, required: false },
+      { name: "underlying_model", type_name: "str", is_list: false, choices: null, default: null, required: false },
+    ];
+    mockedTargetsApi.listTargetTypes.mockResolvedValue({
+      items: TARGET_TYPES.items.map((item) => (
+        item.target_type === "OpenAIVideoTarget" ? { ...item, parameters: videoParameters } : item
+      )),
+    });
+    mockedTargetsApi.createTarget.mockResolvedValue(makeTarget({
+      target_registry_name: "openai_video_custom",
+      target_type: "OpenAIVideoTarget",
+    }));
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("OpenAIVideoTarget");
+    await user.click(screen.getByText("Advanced settings"));
+
+    fireEvent.change(screen.getByPlaceholderText("https://your-resource.openai.azure.com/"), {
+      target: { value: "https://api.openai.com" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("e.g. gpt-4o, my-deployment"), {
+      target: { value: "sora-2" },
+    });
+    fireEvent.change(screen.getByLabelText("N Seconds"), {
+      target: { value: "8" },
+    });
+
+    await user.click(screen.getByText("Create Target"));
+
+    await waitFor(() => {
+      expect(mockedTargetsApi.createTarget).toHaveBeenCalledWith({
+        type: "OpenAIVideoTarget",
+        params: {
+          endpoint: "https://api.openai.com",
+          model_name: "sora-2",
+          n_seconds: 8,
+        },
+      });
+    });
+  });
+
+  it("should render and submit metadata choices and booleans", async () => {
+    const user = userEvent.setup();
+    mockedTargetsApi.createTarget.mockResolvedValue(makeTarget({
+      target_registry_name: "openai_response_custom",
+      target_type: "OpenAIResponseTarget",
+    }));
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("OpenAIResponseTarget");
+    await user.click(screen.getByText("Advanced settings"));
+
+    fireEvent.change(screen.getByPlaceholderText("https://your-resource.openai.azure.com/"), {
+      target: { value: "https://api.openai.com" },
+    });
+    await user.selectOptions(screen.getByLabelText("Reasoning Effort"), "high");
+    const failOnMissingFunction = screen.getByLabelText("Fail On Missing Function");
+    expect(within(failOnMissingFunction).getByRole("option", {
+      name: "Use default (False)",
+    })).toBeInTheDocument();
+    await user.selectOptions(failOnMissingFunction, "false");
+
+    expect(screen.queryByLabelText("Custom Functions")).not.toBeInTheDocument();
+
+    await user.click(screen.getByText("Create Target"));
+
+    await waitFor(() => {
+      expect(mockedTargetsApi.createTarget).toHaveBeenCalledWith({
+        type: "OpenAIResponseTarget",
+        params: {
+          endpoint: "https://api.openai.com",
+          reasoning_effort: "high",
+          fail_on_missing_function: false,
+        },
+      });
+    });
+  });
+
+  it("should render and submit scalar list parameters from target metadata", async () => {
+    const user = userEvent.setup();
+    mockedTargetsApi.createTarget.mockResolvedValue(makeTarget({
+      target_registry_name: "openai_completion_custom",
+      target_type: "OpenAICompletionTarget",
+    }));
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("OpenAICompletionTarget");
+    await user.click(screen.getByText("Advanced settings"));
+
+    fireEvent.change(screen.getByPlaceholderText("https://your-resource.openai.azure.com/"), {
+      target: { value: "https://api.openai.com" },
+    });
+    fireEvent.change(screen.getByLabelText("Stop"), {
+      target: { value: "END, DONE" },
+    });
+
+    await user.click(screen.getByText("Create Target"));
+
+    await waitFor(() => {
+      expect(mockedTargetsApi.createTarget).toHaveBeenCalledWith({
+        type: "OpenAICompletionTarget",
+        params: {
+          endpoint: "https://api.openai.com",
+          stop: ["END", "DONE"],
+        },
+      });
+    });
+  });
+
+  it("should preserve an explicitly selected empty list", async () => {
+    const user = userEvent.setup();
+    mockedTargetsApi.createTarget.mockResolvedValue(makeTarget({
+      target_registry_name: "openai_completion_empty_stop",
+      target_type: "OpenAICompletionTarget",
+    }));
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("OpenAICompletionTarget");
+    fireEvent.change(screen.getByPlaceholderText("https://your-resource.openai.azure.com/"), {
+      target: { value: "https://api.openai.com" },
+    });
+    await user.click(screen.getByText("Advanced settings"));
+    await user.click(screen.getByRole("checkbox", { name: "Use empty list for stop" }));
+    await user.click(screen.getByText("Create Target"));
+
+    await waitFor(() => {
+      expect(mockedTargetsApi.createTarget).toHaveBeenCalledWith({
+        type: "OpenAICompletionTarget",
+        params: {
+          endpoint: "https://api.openai.com",
+          stop: [],
+        },
+      });
+    });
+  });
+
+  it("should parse and submit JSON-object target parameters", async () => {
+    const user = userEvent.setup();
+    mockedTargetsApi.createTarget.mockResolvedValue(makeTarget({
+      target_registry_name: "openai_chat_json",
+      target_type: "OpenAIChatTarget",
+    }));
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("OpenAIChatTarget");
+    fireEvent.change(screen.getByPlaceholderText("https://your-resource.openai.azure.com/"), {
+      target: { value: "https://api.openai.com" },
+    });
+    await user.click(screen.getByText("Advanced settings"));
+
+    fireEvent.change(screen.getByLabelText("Extra Body Parameters"), {
+      target: { value: '{"reasoning":{"effort":"high"},"include":["usage"]}' },
+    });
+    fireEvent.change(screen.getByLabelText("Httpx Client Kwargs"), {
+      target: { value: '{"timeout":180}' },
+    });
+
+    await user.click(screen.getByText("Create Target"));
+
+    await waitFor(() => {
+      expect(mockedTargetsApi.createTarget).toHaveBeenCalledWith({
+        type: "OpenAIChatTarget",
+        params: {
+          endpoint: "https://api.openai.com",
+          extra_body_parameters: {
+            reasoning: { effort: "high" },
+            include: ["usage"],
+          },
+          httpx_client_kwargs: { timeout: 180 },
+        },
+      });
+    });
+  });
+
+  it("should reject malformed or non-object JSON target parameters", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("OpenAIChatTarget");
+    await user.click(screen.getByText("Advanced settings"));
+
+    const extraBody = screen.getByLabelText("Extra Body Parameters");
+    fireEvent.change(extraBody, {
+      target: { value: '{"reasoning":' },
+    });
+    expect(screen.getByText("Extra Body Parameters must contain valid JSON.")).toBeVisible();
+
+    fireEvent.change(extraBody, {
+      target: { value: '["reasoning"]' },
+    });
+    expect(screen.getByText("Extra Body Parameters must be a JSON object.")).toBeVisible();
+
+    await user.click(screen.getByText("Create Target"));
+
+    expect(mockedTargetsApi.createTarget).not.toHaveBeenCalled();
+  });
+
+  it("should keep optional parameters in expandable advanced settings", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("OpenAIResponseTarget");
+
+    const summary = screen.getByText("Advanced settings");
+    const advancedSettings = summary.closest("details");
+    expect(advancedSettings).not.toHaveAttribute("open");
+    expect(screen.getByLabelText("Reasoning Effort")).not.toBeVisible();
+
+    await user.click(summary);
+
+    expect(advancedSettings).toHaveAttribute("open");
+    expect(screen.getByLabelText("Reasoning Effort")).toBeVisible();
+    expect(screen.getByText(/Python callables cannot be configured in CopyRIT/)).toBeVisible();
+  });
+
+  it("should create a metadata-supported target without a hardcoded form shape", async () => {
+    const user = userEvent.setup();
+    mockedTargetsApi.createTarget.mockResolvedValue(makeTarget({
+      target_registry_name: "raw_http_target",
+      target_type: "HTTPTarget",
+    }));
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("HTTPTarget");
+
+    expect(screen.queryByLabelText("Endpoint URL")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("API key (stored in memory only)")).not.toBeInTheDocument();
+    expect(screen.getByText("Create Target").closest("button")).toBeDisabled();
+
+    // A real raw HTTP request template needs actual line breaks between the
+    // request line, headers, and body — the backend parser splits on real
+    // newlines, not on literal "\r\n" characters. The http_request field
+    // must render as a multiline control (Textarea) for this to be entered.
+    const httpRequestTemplate = "POST /chat HTTP/1.1\nHost: example.com\nContent-Type: application/json\n\n{\"message\": \"{PROMPT}\"}";
+    const httpRequestField = screen.getByLabelText(/Http Request/);
+    expect(httpRequestField.tagName).toBe("TEXTAREA");
+    fireEvent.change(httpRequestField, {
+      target: { value: httpRequestTemplate },
+    });
+
+    expect(screen.getByText("Create Target").closest("button")).toBeEnabled();
+    await user.click(screen.getByText("Create Target"));
+
+    await waitFor(() => {
+      expect(mockedTargetsApi.createTarget).toHaveBeenCalledWith({
+        type: "HTTPTarget",
+        params: {
+          http_request: httpRequestTemplate,
+        },
+      });
+    });
+  });
+
+  it("should allow a blank GitHub token when the instance has GITHUB_TOKEN configured", async () => {
+    const user = userEvent.setup();
+    mockedTargetsApi.createTarget.mockResolvedValue(makeTarget({
+      target_registry_name: "copilot",
+      target_type: "GitHubCopilotTarget",
+    }));
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("GitHubCopilotTarget");
+
+    expect(screen.getByRole("region", { name: /selected target details/i }))
+      .toHaveTextContent("Supported authentication: GitHub token");
+    expect(screen.getByText(/CoPyRIT does not use browser or saved Copilot logins/)).toBeVisible();
+    expect(screen.getByText(/Tokens and created targets can be used by anyone with access to this CoPyRIT instance/))
+      .toBeVisible();
+    expect(screen.getByText(/Required unless GITHUB_TOKEN is configured for this CoPyRIT instance/)).toBeVisible();
+    expect(screen.getByText(/Model IDs are not validated when creating a target/)).toBeVisible();
+    expect(screen.getByRole("textbox", { name: /Model \/ Deployment Name/ })).toHaveAccessibleDescription(
+      /Model IDs are not validated.*An unrecognized ID may cause Copilot to use a different model.*Verify the exact model ID is available to the GitHub account associated with this target's token/,
+    );
+    expect(screen.queryByText(/SDK login discovery/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Endpoint URL/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Underlying model differs/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: /Identity-based/ })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("GitHub Token")).toBeVisible();
+    expect(screen.getByLabelText("GitHub Token")).toHaveAttribute("type", "password");
+    expect(screen.getByRole("button", { name: "Create Target" })).toBeDisabled();
+
+    await user.type(screen.getByRole("textbox", { name: /Model \/ Deployment Name/ }), "gpt-4.1");
+    await user.click(screen.getByRole("button", { name: "Create Target" }));
+
+    await waitFor(() => {
+      expect(mockedTargetsApi.createTarget).toHaveBeenCalledWith({
+        type: "GitHubCopilotTarget",
+        params: { model_name: "gpt-4.1" },
+      });
+    });
+    expect(defaultProps.onCreated).toHaveBeenCalledTimes(1);
+  });
+
+  it("should show missing instance token guidance and allow retrying with an entered token", async () => {
+    const user = userEvent.setup();
+    const detail = "GitHub Copilot requires a GitHub token in CoPyRIT. Enter GitHub Token or configure "
+      + "GITHUB_TOKEN for this CoPyRIT instance through its environment or loaded .env/.env.local files.";
+    mockedTargetsApi.createTarget.mockRejectedValueOnce(Object.assign(new Error("Bad Request"), {
+      isAxiosError: true,
+      response: { status: 400, data: { detail } },
+    }));
+    mockedTargetsApi.createTarget.mockResolvedValueOnce(makeTarget({
+      target_registry_name: "copilot",
+      target_type: "GitHubCopilotTarget",
+    }));
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("GitHubCopilotTarget");
+    await user.type(screen.getByRole("textbox", { name: /Model \/ Deployment Name/ }), "gpt-4.1");
+    await user.click(screen.getByRole("button", { name: "Create Target" }));
+
+    expect(await screen.findByText(detail)).toBeVisible();
+    expect(defaultProps.onCreated).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: /Model \/ Deployment Name/ })).toHaveValue("gpt-4.1");
+
+    await user.type(screen.getByLabelText("GitHub Token"), "test-github-token");
+    await user.click(screen.getByRole("button", { name: "Create Target" }));
+
+    await waitFor(() => expect(defaultProps.onCreated).toHaveBeenCalledTimes(1));
+    expect(mockedTargetsApi.createTarget).toHaveBeenLastCalledWith({
+      type: "GitHubCopilotTarget",
+      params: { model_name: "gpt-4.1", github_token: "test-github-token" },
+    });
+  });
+
+  it("should submit the GitHub token and typed Copilot advanced settings", async () => {
+    const user = userEvent.setup();
+    mockedTargetsApi.createTarget.mockResolvedValue(makeTarget({
+      target_registry_name: "copilot",
+      target_type: "GitHubCopilotTarget",
+    }));
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("GitHubCopilotTarget");
+    await user.type(screen.getByRole("textbox", { name: /Model \/ Deployment Name/ }), "gpt-4.1");
+    await user.type(screen.getByLabelText("GitHub Token"), "test-github-token");
+    await user.click(screen.getByText("Advanced settings"));
+    await user.type(screen.getByRole("textbox", { name: "Working Directory" }), "C:\\copilot-workspace");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Retain Session" }), "false");
+    await user.type(screen.getByRole("spinbutton", { name: "Response Timeout Seconds" }), "120");
+    await user.type(screen.getByRole("spinbutton", { name: "Max Requests Per Minute" }), "10");
+    await user.click(screen.getByRole("button", { name: "Create Target" }));
+
+    await waitFor(() => {
+      expect(mockedTargetsApi.createTarget).toHaveBeenCalledWith({
+        type: "GitHubCopilotTarget",
+        params: {
+          model_name: "gpt-4.1",
+          github_token: "test-github-token",
+          working_directory: "C:\\copilot-workspace",
+          retain_session: false,
+          response_timeout_seconds: 120,
+          max_requests_per_minute: 10,
+        },
+      });
+    });
+
+    await selectTargetType("GitHubCopilotTarget");
+    expect(screen.getByLabelText("GitHub Token")).toHaveValue("");
+  });
+
+  it.each(["loading", "failed", "empty"] as const)(
+    "should create GitHub Copilot without an endpoint when metadata is %s",
+    async (metadataStatus) => {
+      const user = userEvent.setup();
+      if (metadataStatus === "loading") {
+        mockedTargetsApi.listTargetTypes.mockReturnValue(new Promise<TargetTypeListResponse>(() => {}));
+      } else if (metadataStatus === "failed") {
+        mockedTargetsApi.listTargetTypes.mockRejectedValueOnce(new Error("registry unavailable"));
+      } else {
+        mockedTargetsApi.listTargetTypes.mockResolvedValueOnce({ items: [] });
+      }
+      mockedTargetsApi.createTarget.mockResolvedValue(makeTarget({
+        target_registry_name: "copilot",
+        target_type: "GitHubCopilotTarget",
+      }));
+
+      render(
+        <TestWrapper>
+          <CreateTargetDialog {...defaultProps} />
+        </TestWrapper>
+      );
+
+      await selectTargetType("GitHubCopilotTarget");
+      expect(screen.getByRole("textbox", { name: /Model \/ Deployment Name/ })).toHaveAccessibleDescription(
+        /Model IDs are not validated.*An unrecognized ID may cause Copilot to use a different model/,
+      );
+      expect(screen.queryByLabelText(/Endpoint URL/)).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
+      expect(screen.queryByRole("radio", { name: /Identity-based/ })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Create Target" })).toBeDisabled();
+      expect(screen.getByLabelText("GitHub Token")).toHaveAttribute("type", "password");
+
+      await user.type(screen.getByRole("textbox", { name: /Model \/ Deployment Name/ }), "gpt-4.1");
+      await user.type(screen.getByLabelText("GitHub Token"), "test-github-token");
+      await user.click(screen.getByRole("button", { name: "Create Target" }));
+
+      await waitFor(() => {
+        expect(mockedTargetsApi.createTarget).toHaveBeenCalledWith({
+          type: "GitHubCopilotTarget",
+          params: { model_name: "gpt-4.1", github_token: "test-github-token" },
+        });
+      });
+    },
+  );
+
+  it("should clear the GitHub token when switching to another target type", async () => {
+    const user = userEvent.setup();
+    mockedTargetsApi.createTarget.mockResolvedValue(makeTarget({
+      target_registry_name: "openai",
+      target_type: "OpenAIChatTarget",
+    }));
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("GitHubCopilotTarget");
+    await user.type(screen.getByLabelText("GitHub Token"), "test-github-token");
+    await selectTargetType("OpenAIChatTarget");
+    expect(screen.queryByText(/Model IDs are not validated when creating a target/)).not.toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: /Endpoint URL/ }), "https://api.openai.com");
+    await user.click(screen.getByRole("button", { name: "Create Target" }));
+
+    await waitFor(() => {
+      expect(mockedTargetsApi.createTarget).toHaveBeenCalledWith({
+        type: "OpenAIChatTarget",
+        params: { endpoint: "https://api.openai.com" },
+      });
+    });
+
+    await selectTargetType("GitHubCopilotTarget");
+    expect(screen.getByLabelText("GitHub Token")).toHaveValue("");
+  });
+
+  it("should support identity auth for targets without an endpoint or api_key parameter", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("AzureBlobStorageTarget");
+
+    expect(screen.queryByLabelText("Endpoint URL")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("API key (stored in memory only)")).not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Identity-based/ })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: /Identity-based/ }));
+
+    expect(screen.getByText("Create Target").closest("button")).toBeEnabled();
+  });
+
+  it("should mask the sas_token parameter and drop it once identity auth is selected", async () => {
+    const user = userEvent.setup();
+    mockedTargetsApi.createTarget.mockResolvedValue(makeTarget({
+      target_registry_name: "blob_target",
+      target_type: "AzureBlobStorageTarget",
+    }));
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog {...defaultProps} />
+      </TestWrapper>
+    );
+
+    await selectTargetType("AzureBlobStorageTarget");
+    await user.click(screen.getByText("Advanced settings"));
+
+    const sasTokenField = screen.getByLabelText(/Sas Token/);
+    expect(sasTokenField).toHaveAttribute("type", "password");
+
+    fireEvent.change(sasTokenField, { target: { value: "sv=2024&sig=secret" } });
+    expect(sasTokenField).toHaveValue("sv=2024&sig=secret");
+
+    // Selecting identity-based auth must clear and disable sas_token so it
+    // can't silently override the chosen auth mode (SAS takes precedence
+    // over DefaultAzureCredential on the backend).
+    await user.click(screen.getByRole("radio", { name: /Identity-based/ }));
+
+    expect(sasTokenField).toBeDisabled();
+    expect(sasTokenField).toHaveValue("");
+
+    await user.click(screen.getByText("Create Target"));
+
+    await waitFor(() => {
+      expect(mockedTargetsApi.createTarget).toHaveBeenCalledWith({
+        type: "AzureBlobStorageTarget",
+        params: {},
+        auth_mode: "identity",
+      });
+    });
+  });
+
   it("should reset form when dialog is closed via onOpenChange", () => {
     const onClose = jest.fn();
 
@@ -636,7 +1796,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "OpenAIChatTarget");
+    await selectTargetType("OpenAIChatTarget");
 
     const endpointInput = screen.getByPlaceholderText(
       "https://your-resource.openai.azure.com/"
@@ -690,7 +1850,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "OpenAIChatTarget");
+    await selectTargetType("OpenAIChatTarget");
 
     const endpointInput = screen.getByPlaceholderText(
       "https://your-resource.openai.azure.com/"
@@ -727,7 +1887,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "OpenAIChatTarget");
+    await selectTargetType("OpenAIChatTarget");
 
     const endpointInput = screen.getByPlaceholderText(
       "https://your-resource.openai.azure.com/"
@@ -752,7 +1912,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "OpenAIChatTarget");
+    await selectTargetType("OpenAIChatTarget");
 
     const endpointInput = screen.getByPlaceholderText(
       "https://your-resource.openai.azure.com/"
@@ -779,7 +1939,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "OpenAIChatTarget");
+    await selectTargetType("OpenAIChatTarget");
 
     const endpointInput = screen.getByPlaceholderText(
       "https://your-resource.openai.azure.com/"
@@ -807,7 +1967,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "AzureMLChatTarget");
+    await selectTargetType("AzureMLChatTarget");
 
     const endpointInput = screen.getByPlaceholderText(
       "https://your-model.region.inference.ml.azure.com/score"
@@ -836,7 +1996,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "AzureMLChatTarget");
+    await selectTargetType("AzureMLChatTarget");
 
     const endpointInput = screen.getByPlaceholderText(
       "https://your-model.region.inference.ml.azure.com/score"
@@ -865,7 +2025,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "AzureMLChatTarget");
+    await selectTargetType("AzureMLChatTarget");
 
     const endpointInput = screen.getByPlaceholderText(
       "https://your-model.region.inference.ml.azure.com/score"
@@ -887,7 +2047,6 @@ describe("CreateTargetDialog", () => {
   });
 
   it("should show target picker when RoundRobinTarget is selected", async () => {
-    const user = userEvent.setup();
 
     render(
       <TestWrapper>
@@ -911,7 +2070,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "RoundRobinTarget");
+    await selectTargetType("RoundRobinTarget");
 
     // Endpoint field should NOT be visible for RoundRobin
     expect(
@@ -923,7 +2082,6 @@ describe("CreateTargetDialog", () => {
   });
 
   it("should disable Create button when fewer than 2 inner targets are selected for RoundRobin", async () => {
-    const user = userEvent.setup();
 
     render(
       <TestWrapper>
@@ -940,10 +2098,64 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "RoundRobinTarget");
+    await selectTargetType("RoundRobinTarget");
 
     const createButton = screen.getByText("Create Target").closest("button");
     expect(createButton).toBeDisabled();
+  });
+
+  it("should keep full long registry names accessible after selecting RoundRobin targets", async () => {
+    const user = userEvent.setup();
+    const firstRegistryName =
+      "openai-production-eastus2-red-team-evaluation-primary-deployment";
+    const secondRegistryName =
+      "openai-production-eastus2-red-team-evaluation-secondary-deployment";
+
+    render(
+      <TestWrapper>
+        <CreateTargetDialog
+          {...defaultProps}
+          existingTargets={[
+            makeTarget({
+              target_registry_name: firstRegistryName,
+              target_type: "OpenAIChatTarget",
+              model_name: "gpt-4o",
+              identifier_hash: "long-hash-a",
+            }),
+            makeTarget({
+              target_registry_name: secondRegistryName,
+              target_type: "OpenAIChatTarget",
+              model_name: "gpt-4o",
+              identifier_hash: "long-hash-b",
+            }),
+          ]}
+        />
+      </TestWrapper>
+    );
+
+    await selectTargetType("RoundRobinTarget");
+    const select = screen.getByText("Select a target to add...").closest("select");
+    expect(select).not.toBeNull();
+    if (!select) {
+      throw new Error("Round Robin target selector was not rendered");
+    }
+
+    await user.selectOptions(select, firstRegistryName);
+    await user.selectOptions(select, secondRegistryName);
+
+    const selectedName = screen.getByLabelText(
+      `Selected target: ${firstRegistryName} (gpt-4o)`
+    );
+    expect(selectedName).toHaveAttribute("tabindex", "0");
+    await user.click(selectedName);
+    expect(selectedName).toHaveFocus();
+
+    expect(
+      screen.getByRole("button", { name: `Remove ${firstRegistryName}` })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(`Weight for ${secondRegistryName}`)
+    ).toBeInTheDocument();
   });
 
   it("filters duplicate-by-identifier-hash targets out of the picker once one is selected", async () => {
@@ -983,7 +2195,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "RoundRobinTarget");
+    await selectTargetType("RoundRobinTarget");
 
     // Before selecting anything: all three are eligible.
     const select = screen.getByText("Select a target to add...").closest("select")!;
@@ -1035,7 +2247,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "RoundRobinTarget");
+    await selectTargetType("RoundRobinTarget");
     const select = screen.getByText("Select a target to add...").closest("select")!;
     await user.selectOptions(select, "foundry_a");
 
@@ -1087,7 +2299,7 @@ describe("CreateTargetDialog", () => {
       </TestWrapper>
     );
 
-    await selectTargetType(user, "RoundRobinTarget");
+    await selectTargetType("RoundRobinTarget");
     const select = screen.getByText("Select a target to add...").closest("select")!;
     await user.selectOptions(select, "a");
     await user.selectOptions(select, "b");
@@ -1137,7 +2349,7 @@ describe("CreateTargetDialog", () => {
         />
       </TestWrapper>
     );
-    await selectTargetType(user, "RoundRobinTarget");
+    await selectTargetType("RoundRobinTarget");
     const select = screen.getByText("Select a target to add...").closest("select")!;
     await user.selectOptions(select, "a");
     await user.selectOptions(select, "b");

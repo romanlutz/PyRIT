@@ -9,7 +9,7 @@
 #       jupytext_version: 1.19.0
 # ---
 # %% [markdown]
-# # 7. AML Chat Targets
+# # AML Chat Targets
 #
 # This code shows how to use Azure Machine Learning (AML) managed online endpoints with PyRIT.
 #
@@ -57,6 +57,6 @@ await output_attack_async(result)
 # %% [markdown]
 #
 # You can then use this cell anywhere you would use a `PromptTarget` object.
-# For example, you can create a red teaming attack and use this instead of the `AzureOpenAI` target and do the [Gandalf Demo](./6_custom_targets.ipynb) but use this AML model.
+# For example, you can create a red teaming attack and use this instead of the `AzureOpenAI` target and do the [custom target demo](./6_custom_targets.ipynb) but use this AML model.
 #
 # This is also shown in the [Red Teaming Attack](../executor/2_multi_turn.ipynb#red-teaming) documentation.

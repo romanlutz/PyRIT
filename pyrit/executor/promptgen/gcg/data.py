@@ -1,7 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-"""Goal/target data helpers for the GCG attack.
+"""
+Goal/target data helpers for the GCG attack.
 
 The GCG optimizer consumes paired ``(goal, target)`` lists: a goal is a harmful
 behavior and the target is the completion string the suffix is optimized to
@@ -47,7 +48,8 @@ Objective:
 
 
 def load_goals_and_targets(*, data: GCGDataConfig) -> tuple[list[str], list[str], list[str], list[str]]:
-    """Return the inline train/test goal and target lists from a data config.
+    """
+    Return the inline train/test goal and target lists from a data config.
 
     With ``GCGDataConfig`` carrying goals and targets inline, this is a thin
     typed accessor: it no longer reads any CSV or touches the network, so the
@@ -78,7 +80,8 @@ async def create_gcg_data_config_async(
     target_metadata_key: str = "gcg_target",
     max_generated_target_length: int = 256,
 ) -> GCGDataConfig:
-    """Resolve a ``SeedDataset`` into inline GCG goals and target completions.
+    """
+    Resolve a ``SeedDataset`` into inline GCG goals and target completions.
 
     A nonempty target completion under ``metadata[target_metadata_key]`` is
     preserved. When metadata is missing or blank, ``adversarial_target`` is
@@ -165,7 +168,15 @@ async def _resolve_goals_and_targets_async(
     target_metadata_key: str,
     max_generated_target_length: int,
 ) -> tuple[list[str], list[str]]:
-    """Resolve provided or generated target completions in seed order."""
+    """
+    Resolve provided or generated target completions in seed order.
+
+    Returns:
+        tuple[list[str], list[str]]: Paired goals and completions in seed order.
+
+    Raises:
+        ValueError: If a missing completion cannot be generated and scored.
+    """
     goals: list[str] = []
     targets: list[str] = []
 
@@ -204,7 +215,15 @@ async def _generate_target_completion_async(
     completion_prompt: SeedPrompt,
     max_generated_target_length: int,
 ) -> str:
-    """Generate and validate one short affirmative completion prefix."""
+    """
+    Generate and validate one short affirmative completion prefix.
+
+    Returns:
+        str: The generated prefix accepted by the completion scorer.
+
+    Raises:
+        ValueError: If the response is invalid, overlong, or rejected by the scorer.
+    """
     prompt = completion_prompt.render_template_value(
         objective=objective,
         max_length=max_generated_target_length,

@@ -1,9 +1,13 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import random
+
 import pytest
 
 from pyrit.converter import ZalgoConverter
+from pyrit.converter.text_selection_strategy import WordProportionSelectionStrategy
+from pyrit.registry import ConverterRegistry
 
 
 async def test_zalgo_output_changes_text():
@@ -21,6 +25,63 @@ async def test_zalgo_reproducible_seed():
     result1 = await converter1.convert_async(prompt=prompt)
     result2 = await converter2.convert_async(prompt=prompt)
     assert result1.output_text == result2.output_text
+
+
+async def test_zalgo_seed_does_not_disturb_global_rng():
+    """A seeded converter must not reseed the process-wide RNG."""
+    original_state = random.getstate()
+    try:
+        # Seed to a value distinct from the converter's own seed. Without this the
+        # assertion can pass vacuously: a leaking component that reseeds to the same
+        # value the previous test used lands back on the captured state.
+        random.seed(0)
+        state_before = random.getstate()
+
+        converter = ZalgoConverter(intensity=5, seed=42)
+        await converter.convert_async(prompt="seed test")
+
+        assert random.getstate() == state_before
+    finally:
+        # Leave process-wide RNG exactly as found so test order stays irrelevant.
+        random.setstate(original_state)
+
+
+async def test_zalgo_seed_is_repeatable_on_same_instance():
+    prompt = "seed test"
+    converter = ZalgoConverter(intensity=5, seed=123)
+    first = await converter.convert_async(prompt=prompt)
+    second = await converter.convert_async(prompt=prompt)
+    assert first.output_text == second.output_text
+
+
+async def test_zalgo_unseeded_converters_stay_independent():
+    """An unseeded converter must keep producing varied output."""
+    converter = ZalgoConverter(intensity=5)
+    outputs = {(await converter.convert_async(prompt="seed test")).output_text for _ in range(5)}
+    assert len(outputs) > 1
+
+
+async def test_zalgo_seed_is_inherited_by_unseeded_random_selection():
+    """
+    An outer converter seed is the root for nested components unless they override it.
+    """
+    prompt = "alpha bravo charlie delta echo foxtrot golf hotel"
+
+    inherited_selection = ZalgoConverter(
+        intensity=3,
+        seed=42,
+        word_selection_strategy=WordProportionSelectionStrategy(proportion=0.5),
+    )
+    repeated = {(await inherited_selection.convert_async(prompt=prompt)).output_text for _ in range(5)}
+    assert len(repeated) == 1
+
+    explicit_selection = ZalgoConverter(
+        intensity=3,
+        seed=42,
+        word_selection_strategy=WordProportionSelectionStrategy(proportion=0.5, seed=7),
+    )
+    explicitly_repeated = {(await explicit_selection.convert_async(prompt=prompt)).output_text for _ in range(5)}
+    assert len(explicitly_repeated) == 1
 
 
 async def test_zalgo_zero_intensity_returns_original():
@@ -76,3 +137,26 @@ async def test_zalgo_negative_intensity(caplog):
 async def test_zalgo_invalid_intensity(bad_intensity):
     with pytest.raises(ValueError):
         ZalgoConverter(intensity=bad_intensity, seed=1)
+
+
+def test_zalgo_identifier_includes_seed() -> None:
+    assert ZalgoConverter(seed=7).get_identifier().params["seed"] == 7
+
+
+def test_zalgo_identifier_distinguishes_seeds() -> None:
+    first = ZalgoConverter(seed=1)
+    second = ZalgoConverter(seed=2)
+    assert first.get_identifier().hash != second.get_identifier().hash
+
+    # Both configurations get their own default registry name instead of colliding.
+    instances = ConverterRegistry().instances
+    instances.register(first)
+    instances.register(second)
+    assert instances.get(first.get_identifier().unique_name) is first
+    assert instances.get(second.get_identifier().unique_name) is second
+
+
+def test_zalgo_identifier_without_seed_is_unchanged_by_the_seed_param() -> None:
+    # An unseeded converter inherits the configured root, and None params are not hashed.
+    assert "seed" not in ZalgoConverter().get_identifier().params
+    assert ZalgoConverter(seed=3).get_identifier().hash == ZalgoConverter(seed=3).get_identifier().hash

@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 
+from pyrit.models import MessagePiece, RequestTraceContext
 from pyrit.models.seeds import (
     AttackSeedGroup,
     AttackTechniqueSeedGroup,
@@ -19,6 +20,85 @@ from pyrit.models.seeds import (
 # =============================================================================
 # SeedGroup Tests
 # =============================================================================
+
+
+@pytest.mark.parametrize("has_next_message", [False, True])
+def test_seed_extraction_marks_only_history_and_preserves_seed_metadata(has_next_message: bool) -> None:
+    prompts = [
+        SeedPrompt(value="Instructions", role="system", sequence=0),
+        SeedPrompt(value="Earlier request", role="user", sequence=1),
+        SeedPrompt(
+            value='{"call_id":"c","name":"lookup","arguments":"{}"}',
+            role="assistant",
+            data_type="function_call",
+            sequence=2,
+        ),
+        SeedPrompt(
+            value='{"call_id":"c","output":"result"}', role="tool", data_type="function_call_output", sequence=3
+        ),
+    ]
+    if has_next_message:
+        prompts.append(SeedPrompt(value="Next request", role="user", sequence=4))
+    for prompt in prompts:
+        prompt.metadata = {
+            "keep": "value",
+            RequestTraceContext.METADATA_KEY: {"old": "trace"},
+            RequestTraceContext.REQUEST_METADATA_KEY: {"old": "request"},
+        }
+    group = SeedGroup(seeds=prompts)
+    original = group.model_dump()
+
+    history = group.prepended_conversation
+    assert history is not None
+    assert [message.get_piece().role for message in history] == [
+        "system",
+        "user",
+        "simulated_assistant",
+        "simulated_tool",
+    ]
+    for message in history:
+        assert message.get_piece().prompt_metadata == {
+            "keep": "value",
+            MessagePiece.PREPENDED_HISTORY_METADATA_KEY: True,
+        }
+    next_message = group.next_message
+    if has_next_message:
+        assert next_message is not None
+        assert next_message.get_piece().prompt_metadata == prompts[-1].metadata
+        assert MessagePiece.PREPENDED_HISTORY_METADATA_KEY not in next_message.get_piece().prompt_metadata
+    else:
+        assert next_message is None
+    assert group.model_dump() == original
+
+
+def test_outgoing_seed_user_messages_are_not_prepended_history() -> None:
+    group = SeedGroup(
+        seeds=[
+            SeedPrompt(value="First request", role="user", sequence=0, metadata={"keep": "first"}),
+            SeedPrompt(value="Second request", role="user", sequence=1, metadata={"keep": "second"}),
+        ]
+    )
+    assert [message.get_piece().prompt_metadata for message in group.user_messages] == [
+        {"keep": "first"},
+        {"keep": "second"},
+    ]
+
+
+def test_seed_prompts_without_metadata_convert_to_messages() -> None:
+    group = SeedGroup(
+        seeds=[
+            SeedPrompt(value="Earlier request", role="user", sequence=0, metadata=None),
+            SeedPrompt(value="Next request", role="user", sequence=1, metadata=None),
+        ]
+    )
+
+    history = group.prepended_conversation
+    assert history is not None
+    assert history[0].get_piece().prompt_metadata == {MessagePiece.PREPENDED_HISTORY_METADATA_KEY: True}
+    next_message = group.next_message
+    assert next_message is not None
+    assert next_message.get_piece().prompt_metadata == {}
+    assert [message.get_piece().prompt_metadata for message in group.user_messages] == [{}, {}]
 
 
 class TestSeedGroupInit:
@@ -612,6 +692,60 @@ class TestAttackSeedGroupWithTechnique:
         assert isinstance(merged, AttackSeedGroup)
         merged._check_invariants()  # should not raise
 
+    def test_system_prompt_technique_merges_onto_user_turn_at_sequence_zero(self):
+        """A ``from_system_prompt`` technique merges onto a group whose first turn is a
+        ``user`` prompt at sequence 0 without a same-sequence role collision.
+
+        Reproduces the adaptive-scenario failure: merging the ``flip`` technique (a
+        ``from_system_prompt`` system seed) onto a multi-turn objective group whose opening
+        turn is a ``user`` prompt at sequence 0 raised ``Inconsistent roles found for
+        sequence 0``. The leading system seed is normalized to sequence 0 and the existing
+        turns shift up (user 0 -> 1, assistant 1 -> 2, ...).
+        """
+        base = AttackSeedGroup(
+            seeds=[
+                SeedObjective(value="objective"),
+                SeedPrompt(value="opening user turn", data_type="text", role="user", sequence=0),
+                SeedPrompt(value="assistant reply", data_type="text", role="assistant", sequence=1),
+                SeedPrompt(value="follow-up user turn", data_type="text", role="user", sequence=2),
+            ]
+        )
+        technique = AttackTechniqueSeedGroup.from_system_prompt("Follow these rules.")
+
+        merged = base.with_technique(technique=technique)
+
+        merged._check_invariants()  # should not raise
+        system_prompts = [p for p in merged.prompts if p.role == "system"]
+        assert len(system_prompts) == 1
+        # The leading system seed is normalized to sequence 0 and the base turns shift up.
+        assert system_prompts[0].sequence == 0
+        assert merged.prompts[0].role == "system"
+        assert [(p.role, p.sequence) for p in merged.prompts] == [
+            ("system", 0),
+            ("user", 1),
+            ("assistant", 2),
+            ("user", 3),
+        ]
+
+    def test_system_prompt_technique_prepends_when_base_uses_negative_sequence(self):
+        """Explicit prepend placement must not reserve a sequence value in the base group."""
+        base = AttackSeedGroup(
+            seeds=[
+                SeedObjective(value="objective"),
+                SeedPrompt(value="opening user turn", data_type="text", role="user", sequence=-1),
+                SeedPrompt(value="assistant reply", data_type="text", role="assistant", sequence=4),
+            ]
+        )
+        technique = AttackTechniqueSeedGroup.from_system_prompt("Follow these rules.")
+
+        merged = base.with_technique(technique=technique)
+
+        assert [(p.role, p.sequence) for p in merged.prompts] == [
+            ("system", 0),
+            ("user", 1),
+            ("assistant", 2),
+        ]
+
     def test_raises_when_technique_has_simulated_conversation_and_prompts_overlap(self):
         """Merging a technique with SeedSimulatedConversation into a group with overlapping prompts raises."""
         base = AttackSeedGroup(
@@ -625,7 +759,7 @@ class TestAttackSeedGroupWithTechnique:
         technique = AttackTechniqueSeedGroup(
             seeds=[
                 SeedSimulatedConversation(
-                    adversarial_chat_system_prompt_path="fake_path.yaml",
+                    adversarial_chat_system_prompt=SeedPrompt(value="adversarial", parameters=["objective"]),
                     num_turns=3,
                 ),
             ],
@@ -640,7 +774,7 @@ class TestAttackSeedGroupWithTechnique:
         technique = AttackTechniqueSeedGroup(
             seeds=[
                 SeedSimulatedConversation(
-                    adversarial_chat_system_prompt_path="fake_path.yaml",
+                    adversarial_chat_system_prompt=SeedPrompt(value="adversarial", parameters=["objective"]),
                     num_turns=3,
                 ),
             ],
@@ -662,7 +796,7 @@ class TestAttackSeedGroupWithTechnique:
         technique = AttackTechniqueSeedGroup(
             seeds=[
                 SeedSimulatedConversation(
-                    adversarial_chat_system_prompt_path="fake_path.yaml",
+                    adversarial_chat_system_prompt=SeedPrompt(value="adversarial", parameters=["objective"]),
                     num_turns=3,
                 ),
             ],
@@ -676,7 +810,7 @@ class TestAttackSeedGroupWithTechnique:
         technique = AttackTechniqueSeedGroup(
             seeds=[
                 SeedSimulatedConversation(
-                    adversarial_chat_system_prompt_path="fake_path.yaml",
+                    adversarial_chat_system_prompt=SeedPrompt(value="adversarial", parameters=["objective"]),
                     num_turns=3,
                 ),
             ],
@@ -723,7 +857,7 @@ class TestAttackSeedGroupFilterCompatible:
         technique = AttackTechniqueSeedGroup(
             seeds=[
                 SeedSimulatedConversation(
-                    adversarial_chat_system_prompt_path="fake.yaml",
+                    adversarial_chat_system_prompt=SeedPrompt(value="adversarial", parameters=["objective"]),
                     num_turns=3,
                 ),
             ],

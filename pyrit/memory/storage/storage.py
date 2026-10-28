@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -11,6 +12,8 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import aiofiles
+
+from pyrit.common import get_mime_type
 
 if TYPE_CHECKING:
     from azure.identity.aio import DefaultAzureCredential
@@ -33,6 +36,10 @@ class StorageIO(ABC):
     """
     Abstract interface for storage systems (local disk, Azure Storage Account, etc.).
     """
+
+    async def delete_file_async(self, path: Path | str) -> None:
+        """Delete one caller-owned file; custom storage must implement cleanup explicitly."""
+        raise NotImplementedError("This storage backend does not support file cleanup")
 
     @abstractmethod
     async def read_file_async(self, path: Path | str) -> bytes:
@@ -69,6 +76,10 @@ class DiskStorageIO(StorageIO):
     """
     Implementation of StorageIO for local disk storage.
     """
+
+    async def delete_file_async(self, path: Path | str) -> None:
+        """Delete one file, not its containing directory."""
+        await asyncio.to_thread(self._convert_to_path(path).unlink, missing_ok=True)
 
     async def read_file_async(self, path: Path | str) -> bytes:
         """
@@ -295,9 +306,10 @@ class AzureBlobStorageIO(StorageIO):
         """
         parsed_url = urlparse(file_path)
         if parsed_url.scheme and parsed_url.netloc:
-            container_name = parsed_url.path.split("/")[1]
-            blob_name = "/".join(parsed_url.path.split("/")[2:])
-            return container_name, blob_name
+            path_parts = parsed_url.path.split("/")
+            # A valid blob URL has a non-empty container segment in its path.
+            if len(path_parts) > 1 and path_parts[1]:
+                return path_parts[1], "/".join(path_parts[2:])
         raise ValueError("Invalid blob URL")
 
     def _resolve_blob_name(self, path: Path | str) -> str:
@@ -325,6 +337,19 @@ class AzureBlobStorageIO(StorageIO):
             return blob_name
         except ValueError:
             return path_str
+
+    async def delete_file_async(self, path: Path | str) -> None:
+        """Delete one blob created by the caller."""
+        from azure.core.exceptions import ResourceNotFoundError
+
+        if not self._client_async:
+            self._client_async = await self._create_container_client_async()
+        try:
+            await self._client_async.delete_blob(self._resolve_blob_name(path))
+        except ResourceNotFoundError:
+            pass
+        finally:
+            await self._close_client_async()
 
     async def read_file_async(self, path: Path | str) -> bytes:
         """
@@ -382,8 +407,9 @@ class AzureBlobStorageIO(StorageIO):
         if not self._client_async:
             self._client_async = await self._create_container_client_async()
         blob_name = self._resolve_blob_name(path)
+        content_type = get_mime_type(blob_name) or self._blob_content_type
         try:
-            await self._upload_blob_async(file_name=blob_name, data=data, content_type=self._blob_content_type)
+            await self._upload_blob_async(file_name=blob_name, data=data, content_type=content_type)
         except Exception as exc:
             logger.exception(f"Failed to write file at {blob_name}: {exc}")
             raise

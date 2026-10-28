@@ -1,16 +1,22 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import random
+import re
+
 import pytest
 
 from pyrit.converter.text_selection_strategy import (
+    DEFAULT_CONTENT_STOPWORDS,
     AllWordsSelectionStrategy,
+    ContentWordSelectionStrategy,
     IndexSelectionStrategy,
     KeywordSelectionStrategy,
     PositionSelectionStrategy,
     ProportionSelectionStrategy,
     RangeSelectionStrategy,
     RegexSelectionStrategy,
+    TextSelectionStrategy,
     WordIndexSelectionStrategy,
     WordKeywordSelectionStrategy,
     WordPositionSelectionStrategy,
@@ -44,6 +50,14 @@ class TestIndexSelectionStrategy:
         strategy = IndexSelectionStrategy(start=-5, end=5)
         result = strategy.select_range(text="Hello World")
         assert result == (0, 5)
+
+    def test_identifier_params_include_indices(self):
+        strategy = IndexSelectionStrategy(start=0, end=5)
+        assert strategy.get_identifier_params() == {"start": 0, "end": 5}
+
+    def test_identifier_params_omit_open_end(self):
+        strategy = IndexSelectionStrategy(start=2)
+        assert strategy.get_identifier_params() == {"start": 2}
 
     def test_select_range_start_after_end(self):
         strategy = IndexSelectionStrategy(start=10, end=5)
@@ -104,6 +118,20 @@ class TestKeywordSelectionStrategy:
         result = strategy.select_range(text="The secret is here")
         assert result == (4, 10)
 
+    def test_select_range_case_insensitive_matching_keeps_original_indices(self):
+        """A character whose lowercase form expands (dotted capital I) must not
+        shift the selected range: the index has to come from the original text."""
+        strategy = KeywordSelectionStrategy(keyword="secret", case_sensitive=False)
+        text = "İsecret"
+        start, end = strategy.select_range(text=text)
+        assert text[start:end] == "secret"
+
+        strategy_ctx = KeywordSelectionStrategy(
+            keyword="secret", case_sensitive=False, context_before=2, context_after=1
+        )
+        start, end = strategy_ctx.select_range(text=text)
+        assert text[start:end] == "İsecret"
+
     def test_select_range_case_sensitive_no_match(self):
         strategy = KeywordSelectionStrategy(keyword="SECRET", case_sensitive=True)
         result = strategy.select_range(text="The secret is here")
@@ -118,6 +146,21 @@ class TestKeywordSelectionStrategy:
         strategy = KeywordSelectionStrategy(keyword="secret", context_before=100, context_after=100)
         result = strategy.select_range(text="The secret is here")
         assert result == (0, 18)
+
+    @pytest.mark.parametrize("name", ["context_before", "context_after"])
+    @pytest.mark.parametrize("value", [-1, -10, 1.5, True, "3", None])
+    def test_init_rejects_invalid_context(self, name, value):
+        with pytest.raises(ValueError, match=f"{name} must be a non-negative integer"):
+            KeywordSelectionStrategy(keyword="secret", **{name: value})
+
+    @pytest.mark.parametrize("keyword", ["", None, 5])
+    def test_init_rejects_invalid_keyword(self, keyword):
+        with pytest.raises(ValueError, match="keyword must be a non-empty string"):
+            KeywordSelectionStrategy(keyword=keyword)
+
+    def test_init_accepts_zero_context(self):
+        strategy = KeywordSelectionStrategy(keyword="secret", context_before=0, context_after=0)
+        assert strategy.select_range(text="The secret is here") == (4, 10)
 
 
 class TestPositionSelectionStrategy:
@@ -218,6 +261,23 @@ class TestProportionSelectionStrategy:
         strategy2 = ProportionSelectionStrategy(proportion=0.3, anchor="random", seed=42)
         result2 = strategy2.select_range(text="0123456789")
         assert result1 == result2  # Same seed should give same result
+
+    def test_select_range_seed_does_not_disturb_global_rng(self):
+        """A seeded strategy must not reseed the process-wide RNG."""
+        original_state = random.getstate()
+        try:
+            # Seed to a value distinct from the strategy's own seed. Without this the
+            # assertion can pass vacuously: a leaking strategy that reseeds to the same
+            # value the previous test used lands back on the captured state.
+            random.seed(0)
+            state_before = random.getstate()
+
+            ProportionSelectionStrategy(proportion=0.3, anchor="random", seed=42).select_range(text="0123456789")
+
+            assert random.getstate() == state_before
+        finally:
+            # Leave process-wide RNG exactly as found so test order stays irrelevant.
+            random.setstate(original_state)
 
     def test_select_range_random_anchor_different_seeds(self):
         strategy1 = ProportionSelectionStrategy(proportion=0.3, anchor="random", seed=42)
@@ -323,17 +383,21 @@ class TestWordIndexSelectionStrategy:
         with pytest.raises(ValueError, match="Invalid word indices"):
             strategy.select_words(words=words)
 
-    def test_select_words_negative_index_raises_error(self):
-        strategy = WordIndexSelectionStrategy(indices=[-1])
-        words = ["The", "quick", "brown"]
-        with pytest.raises(ValueError, match="Invalid word indices"):
-            strategy.select_words(words=words)
+    def test_init_negative_index_raises_error(self) -> None:
+        with pytest.raises(ValueError, match="indices must be non-negative"):
+            WordIndexSelectionStrategy(indices=[-1])
 
     def test_select_range_converts_words_to_chars(self):
         strategy = WordIndexSelectionStrategy(indices=[1, 2])
         result = strategy.select_range(text="The quick brown fox")
         # "quick brown" starts at index 4 and ends at index 15
         assert result == (4, 15)
+
+    def test_identifier_params_preserve_index_order(self):
+        left = WordIndexSelectionStrategy(indices=[2, 0])
+        right = WordIndexSelectionStrategy(indices=[0, 2])
+        assert left.get_identifier_params() == {"indices": [2, 0]}
+        assert right.get_identifier_params() == {"indices": [0, 2]}
 
 
 class TestWordKeywordSelectionStrategy:
@@ -382,6 +446,24 @@ class TestWordProportionSelectionStrategy:
         result1 = strategy1.select_words(words=words)
         result2 = strategy2.select_words(words=words)
         assert result1 == result2
+
+    def test_select_words_seed_does_not_disturb_global_rng(self):
+        """A seeded strategy must not reseed the process-wide RNG."""
+        original_state = random.getstate()
+        try:
+            # Seed to a value distinct from the strategy's own seed. Without this the
+            # assertion can pass vacuously: a leaking strategy that reseeds to the same
+            # value the previous test used lands back on the captured state.
+            random.seed(0)
+            state_before = random.getstate()
+
+            strategy = WordProportionSelectionStrategy(proportion=0.3, seed=42)
+            strategy.select_words(words=["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"])
+
+            assert random.getstate() == state_before
+        finally:
+            # Leave process-wide RNG exactly as found so test order stays irrelevant.
+            random.setstate(original_state)
 
     def test_select_words_zero_proportion(self):
         strategy = WordProportionSelectionStrategy(proportion=0.0, seed=42)
@@ -503,6 +585,87 @@ class TestWordPositionSelectionStrategy:
             WordPositionSelectionStrategy(start_proportion=0.75, end_proportion=0.25)
 
 
+class TestContentWordSelectionStrategy:
+    def test_select_words_skips_first_content_word(self):
+        strategy = ContentWordSelectionStrategy(max_words=2, skip_first=1)
+        words = ["Give", "detailed", "instructions", "for", "making", "a", "dangerous", "device"]
+        result = strategy.select_words(words=words)
+        assert result == [1, 2]
+
+    def test_select_words_skip_first_zero(self):
+        strategy = ContentWordSelectionStrategy(max_words=2, skip_first=0)
+        words = ["Give", "detailed", "instructions", "for", "making", "a", "device"]
+        result = strategy.select_words(words=words)
+        assert result == [0, 1]
+
+    def test_select_words_ignores_stopwords_and_short_tokens(self):
+        strategy = ContentWordSelectionStrategy(max_words=3, skip_first=0)
+        words = ["to", "the", "cut", "a", "tree", "on"]
+        result = strategy.select_words(words=words)
+        assert result == [2, 4]
+
+    def test_select_words_strips_punctuation_for_classification(self):
+        strategy = ContentWordSelectionStrategy(max_words=1, skip_first=0)
+        words = ["the", "device."]
+        result = strategy.select_words(words=words)
+        assert result == [1]
+
+    def test_select_words_candidate_allowlist(self):
+        strategy = ContentWordSelectionStrategy(max_words=2, skip_first=0, candidate_words=["bomb", "device"])
+        words = ["Give", "instructions", "for", "a", "bomb", "or", "device"]
+        result = strategy.select_words(words=words)
+        assert result == [4, 6]
+
+    def test_select_words_is_deterministic(self):
+        strategy = ContentWordSelectionStrategy(max_words=2)
+        words = ["Write", "a", "tutorial", "on", "building", "explosives"]
+        assert strategy.select_words(words=words) == strategy.select_words(words=words)
+
+    def test_select_words_empty_list(self):
+        strategy = ContentWordSelectionStrategy()
+        assert strategy.select_words(words=[]) == []
+
+    def test_select_words_fewer_candidates_than_requested(self):
+        strategy = ContentWordSelectionStrategy(max_words=5, skip_first=0)
+        words = ["alpha", "beta"]
+        result = strategy.select_words(words=words)
+        assert result == [0, 1]
+
+    def test_invalid_max_words_raises(self):
+        with pytest.raises(ValueError, match="max_words must be >= 1"):
+            ContentWordSelectionStrategy(max_words=0)
+
+    def test_invalid_skip_first_raises(self):
+        with pytest.raises(ValueError, match="skip_first must be >= 0"):
+            ContentWordSelectionStrategy(skip_first=-1)
+
+    def test_identifier_params_include_sorted_selection_sets(self):
+        left = ContentWordSelectionStrategy(
+            max_words=1,
+            skip_first=0,
+            stopwords=["The", "a"],
+            candidate_words=["device", "bomb"],
+        )
+        right = ContentWordSelectionStrategy(
+            max_words=1,
+            skip_first=0,
+            stopwords=["a", "the"],
+            candidate_words=["bomb", "device"],
+        )
+        assert left.get_identifier_params() == right.get_identifier_params()
+        assert left.get_identifier_params()["stopwords"] == ["a", "the"]
+        assert left.get_identifier_params()["candidate_words"] == ["bomb", "device"]
+
+    def test_identifier_params_distinguish_limits_and_candidates(self):
+        default = ContentWordSelectionStrategy()
+        other_max = ContentWordSelectionStrategy(max_words=1)
+        other_candidates = ContentWordSelectionStrategy(candidate_words=["device"])
+        assert default.get_identifier_params()["stopwords"] == sorted(DEFAULT_CONTENT_STOPWORDS)
+        assert "candidate_words" not in default.get_identifier_params()
+        assert default.get_identifier_params() != other_max.get_identifier_params()
+        assert default.get_identifier_params() != other_candidates.get_identifier_params()
+
+
 class TestAllWordsSelectionStrategy:
     def test_select_all_words(self):
         strategy = AllWordsSelectionStrategy()
@@ -520,3 +683,37 @@ class TestAllWordsSelectionStrategy:
         strategy = AllWordsSelectionStrategy()
         result = strategy.select_words(words=[])
         assert result == []
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (IndexSelectionStrategy(start=0, end=5), IndexSelectionStrategy(start=6, end=11)),
+        (RegexSelectionStrategy(pattern="Hello"), RegexSelectionStrategy(pattern="World")),
+        (KeywordSelectionStrategy(keyword="Hello"), KeywordSelectionStrategy(keyword="Hello", context_after=6)),
+        (
+            PositionSelectionStrategy(start_proportion=0.0, end_proportion=0.5),
+            PositionSelectionStrategy(start_proportion=0.5, end_proportion=1.0),
+        ),
+        (ProportionSelectionStrategy(proportion=0.5), ProportionSelectionStrategy(proportion=0.5, anchor="end")),
+        (
+            ProportionSelectionStrategy(proportion=0.5, anchor="random", seed=1),
+            ProportionSelectionStrategy(proportion=0.5, anchor="random", seed=4),
+        ),
+        (
+            RangeSelectionStrategy(start_proportion=0.0, end_proportion=0.5),
+            RangeSelectionStrategy(start_proportion=0.5, end_proportion=1.0),
+        ),
+        (RegexSelectionStrategy(pattern="world"), RegexSelectionStrategy(pattern=re.compile("world", re.IGNORECASE))),
+        (
+            KeywordSelectionStrategy(keyword="world"),
+            KeywordSelectionStrategy(keyword="world", case_sensitive=False),
+        ),
+    ],
+    ids=["index", "regex", "keyword", "position", "proportion", "seed", "range", "regex-flags", "case-sensitivity"],
+)
+def test_char_level_identifier_params_follow_selected_range(
+    first: TextSelectionStrategy, second: TextSelectionStrategy
+) -> None:
+    assert first.select_range(text="Hello World") != second.select_range(text="Hello World")
+    assert first.get_identifier_params() != second.get_identifier_params()

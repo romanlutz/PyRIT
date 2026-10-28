@@ -7,6 +7,7 @@ from typing import Any
 
 from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
 from pyrit.common.path import EXECUTOR_SEED_PROMPT_PATH
+from pyrit.executor.attack.component import PrependedConversationConfig
 from pyrit.executor.attack.core.attack_config import AttackConverterConfig, AttackScoringConfig
 from pyrit.executor.attack.core.attack_parameters import AttackParameters
 from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
@@ -43,6 +44,8 @@ class SkeletonKeyAttack(PromptSendingAttack):
     Learn more about the attack [@microsoft2024skeletonkey].
     """
 
+    FIXED_PARAMS_TYPE = SkeletonKeyAttackParameters
+
     DEFAULT_SKELETON_KEY_PROMPT_PATH: Path = Path(EXECUTOR_SEED_PROMPT_PATH) / "skeleton_key" / "skeleton_key.prompt"
     DEFAULT_SKELETON_KEY_ACCEPTANCE_PATH: Path = (
         Path(EXECUTOR_SEED_PROMPT_PATH) / "skeleton_key" / "skeleton_key_acceptance.prompt"
@@ -59,6 +62,7 @@ class SkeletonKeyAttack(PromptSendingAttack):
         skeleton_key_prompt: str | None = None,
         skeleton_key_acceptance: str | None = None,
         max_attempts_on_failure: int = 0,
+        prepended_conversation_config: PrependedConversationConfig | None = None,
     ) -> None:
         """
         Initialize the skeleton key attack strategy.
@@ -73,6 +77,10 @@ class SkeletonKeyAttack(PromptSendingAttack):
             skeleton_key_acceptance (str | None): The simulated assistant acceptance response to prepend.
                 If not provided, uses the default acceptance response.
             max_attempts_on_failure (int): Maximum number of attempts to retry on failure.
+            prepended_conversation_config (PrependedConversationConfig | None): Policy for the
+                skeleton key exchange this attack prepends. Controls which roles receive request
+                converters and how a target without editable history renders that exchange with
+                the live request.
         """
         super().__init__(
             objective_target=objective_target,
@@ -80,7 +88,7 @@ class SkeletonKeyAttack(PromptSendingAttack):
             attack_scoring_config=attack_scoring_config,
             prompt_normalizer=prompt_normalizer,
             max_attempts_on_failure=max_attempts_on_failure,
-            params_type=SkeletonKeyAttackParameters,
+            prepended_conversation_config=prepended_conversation_config,
         )
 
         self._skeleton_key_prompt = (

@@ -1,10 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import asyncio
 from collections.abc import Callable, Generator, Sequence
 from typing import Any
 
+from pyrit.common.task_utils import gather_with_cleanup_async
 from pyrit.prompt_target.common.prompt_target import PromptTarget
 
 
@@ -29,6 +29,24 @@ def _get_chunks(*args: Sequence[Any], batch_size: int) -> Generator[list[Sequenc
             raise ValueError("All arguments must have the same length.")
     for i in range(0, len(args[0]), batch_size):
         yield [arg[i : i + batch_size] for arg in args]
+
+
+def _validate_batch_size(batch_size: int) -> None:
+    """
+    Validate that the batch size is a positive integer.
+
+    ``range`` treats a negative step as an empty range, so a negative batch size would
+    otherwise run no tasks and return no results without any error.
+
+    Args:
+        batch_size (int): Batch size
+
+    Raises:
+        ValueError: When the batch size is not an integer of at least 1.
+    """
+    # bool is an int subclass, so True would otherwise be accepted as a batch size of 1.
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError(f"batch_size must be an integer of at least 1, got {batch_size!r}.")
 
 
 def _validate_rate_limit_parameters(prompt_target: PromptTarget | None, batch_size: int) -> None:
@@ -59,6 +77,9 @@ async def batch_task_async(
     """
     Perform provided task in batches and validate parameters using helpers.
 
+    A failed or cancelled task stops later batches and cancels and drains unfinished
+    tasks in its batch before propagating. Completed results and side effects remain.
+
     Args:
         prompt_target(PromptTarget): Target to validate
         batch_size (int): Batch size
@@ -71,11 +92,13 @@ async def batch_task_async(
         responses(list): List of results from the batched function
 
     Raises:
+        ValueError: When the batch size is not an integer of at least 1.
         ValueError: When no items to batch are provided.
         ValueError: When number of lists of items to batch does not match number of task arguments.
     """
     responses = []
 
+    _validate_batch_size(batch_size)
     _validate_rate_limit_parameters(prompt_target=prompt_target, batch_size=batch_size)
 
     if len(items_to_batch) == 0 or len(items_to_batch[0]) == 0:
@@ -91,7 +114,7 @@ async def batch_task_async(
                 task_kwargs[task_argument] = task_args[arg_index][batch_index]
             tasks.append(task_func(**task_kwargs))
 
-        batch_results = await asyncio.gather(*tasks)
+        batch_results = await gather_with_cleanup_async(tasks)
         responses.extend(batch_results)
 
     return responses

@@ -2,10 +2,11 @@
 # Licensed under the MIT license.
 
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageCms
 
 from pyrit.converter import ImageResizingConverter
 
@@ -52,8 +53,8 @@ def test_image_resizing_converter_initialization_output_format_validation():
 
 def test_image_resizing_converter_initialization_scale_factor_validation():
     """Test validation of scale_factor parameter."""
-    for invalid_scale_factor in [0.0, -0.1, -1.0, -100.0]:
-        with pytest.raises(ValueError, match="Scale factor must be positive"):
+    for invalid_scale_factor in [0.0, -0.1, -1.0, -100.0, float("nan"), float("inf"), float("-inf")]:
+        with pytest.raises(ValueError, match="Scale factor must be a positive finite number"):
             ImageResizingConverter(scale_factor=invalid_scale_factor)
 
     for valid_scale_factor in [0.1, 0.5, 1.0, 2.0, 10.0]:
@@ -229,3 +230,99 @@ async def test_image_resizing_converter_output_dimensions(sample_image_bytes):
     expected_width = int(original_size[0] * scale_factor)
     expected_height = int(original_size[1] * scale_factor)
     assert resized_image.size == (expected_width, expected_height)
+
+
+@pytest.mark.parametrize(
+    ("input_size", "expected_size"),
+    [
+        ((1, 1), (1, 1)),
+        ((1, 8), (1, 4)),
+        ((8, 1), (4, 1)),
+    ],
+)
+def test_image_resizing_converter_minimum_output_dimensions(
+    input_size: tuple[int, int], expected_size: tuple[int, int]
+) -> None:
+    """Test that each output dimension is clamped to at least one pixel."""
+    converter = ImageResizingConverter(scale_factor=0.5)
+    image = Image.new("RGB", input_size)
+
+    resized_image = converter._apply_transform(image)
+
+    assert resized_image.size == expected_size
+
+
+@pytest.mark.parametrize("icc_profile", [None, b"source CMYK ICC profile"])
+def test_image_resizing_converter_cmyk_to_png_conversion(icc_profile: bytes | None) -> None:
+    """Test that converting a CMYK image with output_format='PNG' succeeds and converts to RGB."""
+    converter = ImageResizingConverter(output_format="PNG", scale_factor=0.5)
+    with Image.new("CMYK", (40, 40), (100, 50, 0, 0)) as cmyk_image:
+        if icc_profile is not None:
+            cmyk_image.info["icc_profile"] = icc_profile
+
+        transformed_io, output_format = converter._transform_image(cmyk_image, "JPEG")
+        assert output_format == "PNG"
+        assert cmyk_image.info.get("icc_profile") == icc_profile
+
+        with transformed_io, Image.open(transformed_io) as result_img:
+            assert result_img.format == "PNG"
+            assert result_img.mode == "RGB"
+            assert result_img.size == (20, 20)
+            assert result_img.getpixel((0, 0)) == (155, 205, 255)
+            assert "icc_profile" not in result_img.info
+
+
+@pytest.mark.usefixtures("sqlite_instance")
+async def test_image_resizing_converter_cmyk_profile_removed_from_saved_png(tmp_path: Path) -> None:
+    converter = ImageResizingConverter(output_format="PNG", scale_factor=0.5)
+    input_path = tmp_path / "cmyk.jpeg"
+    with Image.new("CMYK", (40, 40), (100, 50, 0, 0)) as image:
+        image.save(input_path, "JPEG", icc_profile=b"source CMYK ICC profile")
+
+    result = await converter.convert_async(prompt=str(input_path), input_type="image_path")
+
+    assert result.output_type == "image_path"
+    assert Path(result.output_text).suffix == ".png"
+    with Image.open(result.output_text) as output:
+        assert output.format == "PNG"
+        assert output.mode == "RGB"
+        assert output.size == (20, 20)
+        assert "icc_profile" not in output.info
+
+
+@pytest.mark.parametrize("mode", ["RGB", "RGBA"])
+def test_image_resizing_converter_preserves_rgb_icc_profile(mode: str) -> None:
+    converter = ImageResizingConverter(output_format="PNG")
+    icc_profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    with Image.new(mode, (40, 40)) as image:
+        image.info["icc_profile"] = icc_profile
+
+        transformed_io, _ = converter._transform_image(image, "PNG")
+
+        with transformed_io, Image.open(transformed_io) as output:
+            assert output.mode == mode
+            assert output.info["icc_profile"] == icc_profile
+
+
+@pytest.mark.usefixtures("sqlite_instance")
+@pytest.mark.parametrize(
+    ("pixel_value", "expected_value"),
+    [(-1, 0), (0, 0), (1024, 1024), (65535, 65535), (65536, 65535)],
+)
+async def test_image_resizing_converter_integer_tiff_to_png(
+    *, tmp_path: Path, pixel_value: int, expected_value: int
+) -> None:
+    converter = ImageResizingConverter(output_format="PNG", scale_factor=0.5)
+    input_path = tmp_path / "integer.tiff"
+    with Image.new("I", (32, 32), pixel_value) as image:
+        image.save(input_path, "TIFF")
+
+    result = await converter.convert_async(prompt=str(input_path), input_type="image_path")
+
+    assert result.output_type == "image_path"
+    assert Path(result.output_text).suffix == ".png"
+    with Image.open(result.output_text) as output:
+        assert output.format == "PNG"
+        assert output.mode == "I;16"
+        assert output.size == (16, 16)
+        assert output.getextrema() == (expected_value, expected_value)

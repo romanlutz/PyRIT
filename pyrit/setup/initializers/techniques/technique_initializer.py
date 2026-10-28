@@ -17,6 +17,7 @@ Per-name registration is idempotent: pre-existing entries in the registry are
 not overwritten.
 """
 
+import asyncio
 import logging
 from enum import Enum
 
@@ -90,14 +91,20 @@ class TechniqueInitializer(PyRITInitializer):
     overwritten.
     """
 
-    @property
-    def supported_parameters(self) -> list[Parameter]:
-        """The list of parameters this initializer accepts."""
+    @classmethod
+    def supported_parameters(cls) -> list[Parameter]:
+        """
+        Declare the initializer parameters.
+
+        Returns:
+            list[Parameter]: Supported inputs and defaults.
+        """
         return [
             Parameter(
                 name="tags",
                 description="Technique groups to register (e.g., ['core'], ['core', 'extra'], or ['all'])",
                 default=[TechniqueInitializerTags.CORE.value],
+                param_type=list[TechniqueInitializerTags],
             ),
         ]
 
@@ -112,7 +119,8 @@ class TechniqueInitializer(PyRITInitializer):
         if TechniqueInitializerTags.ALL.value in tags:
             tags = [TechniqueInitializerTags.CORE.value, TechniqueInitializerTags.EXTRA.value]
 
-        factories = build_technique_factories(groups=tags)
+        # Building the catalog reads each technique's prompt YAML, so keep it off the event loop.
+        factories = await asyncio.to_thread(build_technique_factories, groups=tags)
 
         registry = AttackTechniqueRegistry.get_registry_singleton()
         registry.register_from_factories(factories)

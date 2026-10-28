@@ -2,8 +2,10 @@
 # Licensed under the MIT license.
 
 import logging
+import math
 from typing import Any, Literal
 
+from pyrit.common import forward_init_parameters
 from pyrit.exceptions import (
     pyrit_target_retry,
 )
@@ -20,6 +22,10 @@ TTSModel = Literal["tts-1", "tts-1-hd"]
 TTSVoice = Literal["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
 TTSResponseFormat = Literal["flac", "mp3", "mp4", "mpeg", "mpga", "m4a", "ogg", "wav", "webm"]
 
+# Range documented for the OpenAI speech API.
+_MIN_SPEED = 0.25
+_MAX_SPEED = 4.0
+
 
 class OpenAITTSTarget(OpenAITarget):
     """A prompt target for OpenAI Text-to-Speech (TTS) endpoints."""
@@ -30,6 +36,7 @@ class OpenAITTSTarget(OpenAITarget):
         )
     )
 
+    @forward_init_parameters
     def __init__(
         self,
         *,
@@ -62,9 +69,21 @@ class OpenAITTSTarget(OpenAITarget):
             custom_configuration (TargetConfiguration, Optional): Override the default configuration for
                 this target instance. Defaults to None.
             **kwargs: Additional keyword arguments passed to the parent OpenAITarget class.
-            httpx_client_kwargs (dict, Optional): Additional kwargs to be passed to the ``httpx.AsyncClient()``
-                constructor. For example, to specify a 3 minute timeout: ``httpx_client_kwargs={"timeout": 180}``
+            httpx_client_kwargs (dict, Optional): Additional ``AsyncOpenAI`` constructor options.
+                For example, ``{"timeout": 180}`` sets a three-minute timeout. Custom ``http_client``
+                instances use HTTPX on SDK 2, or HTTPX2 / legacy HTTPX on SDK 3.
+
+        Raises:
+            ValueError: If ``speed`` is given and is not a finite number from 0.25 to 4.0.
         """
+        if speed is not None and (
+            not isinstance(speed, (int, float))
+            or isinstance(speed, bool)
+            or not _MIN_SPEED <= speed <= _MAX_SPEED
+            or not math.isfinite(speed)
+        ):
+            raise ValueError(f"speed must be a finite number from {_MIN_SPEED} to {_MAX_SPEED}, got {speed!r}")
+
         super().__init__(custom_configuration=custom_configuration, **kwargs)
 
         self._voice = voice
@@ -104,8 +123,8 @@ class OpenAITTSTarget(OpenAITarget):
             },
         )
 
-    @limit_requests_per_minute
     @pyrit_target_retry
+    @limit_requests_per_minute
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Asynchronously send a message to the OpenAI TTS target.

@@ -180,7 +180,7 @@ class _SaladBenchDataset(_RemoteDatasetLoader):
         """
         return re.sub(r"^O\d+:\s*", "", category)
 
-    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
+    async def _fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch SALAD-Bench dataset from HuggingFace and return as SeedDataset.
 
@@ -220,7 +220,7 @@ class _SaladBenchDataset(_RemoteDatasetLoader):
             "Shanghai Artificial Intelligence Laboratory",
             "Harbin Institute of Technology",
             "Beijing Institute of Technology",
-            "Chinese University of Hong Kong",
+            "The Chinese University of Hong Kong",
             "The Hong Kong Polytechnic University",
         ]
 

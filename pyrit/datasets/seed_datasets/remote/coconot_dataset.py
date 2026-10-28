@@ -82,7 +82,14 @@ class _CoCoNotBaseDataset(_RemoteDatasetLoader):
         "Hannaneh Hajishirzi",
     ]
 
-    _GROUPS: ClassVar[list[str]] = ["Allen Institute for AI"]
+    _GROUPS: ClassVar[list[str]] = [
+        "Allen Institute for Artificial Intelligence",
+        "University of Washington",
+        "The Ohio State University",
+        "Microsoft Research",
+        "Samaya AI",
+        "NVIDIA",
+    ]
 
     HF_DATASET_NAME: str = "allenai/coconot"
 
@@ -124,7 +131,7 @@ class _CoCoNotBaseDataset(_RemoteDatasetLoader):
         return self.SPLITS
 
     @override
-    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
+    async def _fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch the CoCoNot subset and return it as a SeedDataset.
 

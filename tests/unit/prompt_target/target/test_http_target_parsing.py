@@ -5,6 +5,7 @@
 from collections.abc import Callable
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from pyrit.prompt_target.http_target.http_target import HTTPTarget
@@ -41,8 +42,8 @@ def mock_http_response() -> MagicMock:
 
 def test_parse_json_response_no_match(mock_http_response):
     parse_json_response = get_http_target_json_response_callback_function(key="nonexistant_key")
-    result = parse_json_response(mock_http_response)
-    assert result == ""
+    with pytest.raises(ValueError, match="nonexistant_key"):
+        parse_json_response(mock_http_response)
 
 
 def test_parse_json_response_match(mock_http_response, mock_callback_function):
@@ -102,17 +103,38 @@ def test_parse_raw_http_request_preserves_body_trailing_whitespace(sqlite_instan
     assert version == "HTTP/1.1"
 
 
+def test_parse_raw_http_request_preserves_crlf_in_body(sqlite_instance):
+    request = (
+        "POST /upload HTTP/1.1\r\n"
+        "Host: example.com\r\n"
+        "Content-Type: multipart/form-data; boundary=XyZ\r\n"
+        "\r\n"
+        "--XyZ\r\n"
+        'Content-Disposition: form-data; name="prompt"\r\n'
+        "\r\n"
+        "hello\r\n"
+        "--XyZ--\r\n"
+    )
+    target = HTTPTarget(http_request=request)
+
+    headers, body, url, method, version = target.parse_raw_http_request(request)
+
+    assert url == "https://example.com/upload"
+    assert method == "POST"
+    assert headers == {"host": "example.com", "content-type": "multipart/form-data; boundary=XyZ"}
+    assert body == '--XyZ\r\nContent-Disposition: form-data; name="prompt"\r\n\r\nhello\r\n--XyZ--\r\n'
+    assert version == "HTTP/1.1"
+
+
 def test_parse_regex_response_no_match():
-    mock_response = MagicMock()
-    mock_response.content = b"<html><body>No match here</body></html>"
+    mock_response = httpx.Response(200, content=b"<html><body>No match here</body></html>")
     parse_html_function = get_http_target_regex_matching_callback_function(key=r'no_results\/[^\s"]+')
     result = parse_html_function(mock_response)
-    assert result == "b'<html><body>No match here</body></html>'"
+    assert result == "<html><body>No match here</body></html>"
 
 
 def test_parse_regex_response_match():
-    mock_response = MagicMock()
-    mock_response.content = b"<html><body>Match: 1234</body></html>"
+    mock_response = httpx.Response(200, content=b"<html><body>Match: 1234</body></html>")
     parse_html_response = get_http_target_regex_matching_callback_function(r"Match: (\d+)")
     result = parse_html_response(mock_response)
     assert result == "Match: 1234"
@@ -132,3 +154,84 @@ def test_parse_json_response_negative_array_index():
     parse_json_response = get_http_target_json_response_callback_function(key="data[0].items[-1]")
     result = parse_json_response(mock_response)
     assert result == "c"
+
+
+def test_parse_json_response_missing_key_raises():
+    mock_response = MagicMock()
+    mock_response.content = b'{"mock_key": "value1"}'
+    parse_json_response = get_http_target_json_response_callback_function(key="nonexistant_key")
+    with pytest.raises(ValueError, match="nonexistant_key"):
+        parse_json_response(mock_response)
+
+
+def test_parse_json_response_missing_nested_key_raises():
+    mock_response = MagicMock()
+    mock_response.content = b'{"data": [{"items": ["a", "b", "c"]}]}'
+    parse_json_response = get_http_target_json_response_callback_function(key="data[0].missing")
+    with pytest.raises(ValueError, match="missing"):
+        parse_json_response(mock_response)
+
+
+def test_parse_json_response_out_of_range_index_raises():
+    mock_response = MagicMock()
+    mock_response.content = b'{"data": [{"items": ["a", "b", "c"]}]}'
+    parse_json_response = get_http_target_json_response_callback_function(key="data[5]")
+    with pytest.raises(ValueError, match=r"data\[5\]"):
+        parse_json_response(mock_response)
+
+
+def test_parse_regex_response_matches_decoded_text():
+    body = "Sure \u2014 here\u2019s the answer:\nStep 1: caf\u00e9"
+    mock_response = httpx.Response(200, content=body.encode("utf-8"))
+    parse_html_response = get_http_target_regex_matching_callback_function(r"Step 1: .*")
+    result = parse_html_response(mock_response)
+    assert result == "Step 1: caf\u00e9"
+
+
+def test_parse_regex_response_no_match_returns_decoded_text():
+    body = "Na\u00efve r\u00e9sum\u00e9 \U0001f600"
+    mock_response = httpx.Response(200, content=body.encode("utf-8"))
+    parse_html_response = get_http_target_regex_matching_callback_function(r"no_match")
+    assert parse_html_response(mock_response) == body
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("output2", "digits"),
+        ("generated-text", "hyphen"),
+        ("data.v2_answer", "nested"),
+        ("results[1].item-id", "list"),
+    ],
+)
+def test_parse_json_response_keys_with_digits_and_hyphens(key: str, expected: str):
+    mock_response = httpx.Response(
+        200,
+        content=(
+            b'{"output2": "digits", "generated-text": "hyphen", "data": {"v2_answer": "nested"},'
+            b' "results": [{"item-id": "x"}, {"item-id": "list"}]}'
+        ),
+    )
+    parse_json_response = get_http_target_json_response_callback_function(key=key)
+    assert parse_json_response(mock_response) == expected
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        'choices[0]["message"]["content"]',
+        "choices[0]['message']['content']",
+        'choices[0][ "message" ].content',
+        "choices[-1].message.content",
+    ],
+)
+def test_parse_json_response_quoted_bracket_keys(key: str):
+    mock_response = httpx.Response(200, content=b'{"choices": [{"message": {"content": "hello"}}]}')
+    parse_json_response = get_http_target_json_response_callback_function(key=key)
+    assert parse_json_response(mock_response) == "hello"
+
+
+def test_parse_json_response_quoted_key_may_contain_dots():
+    mock_response = httpx.Response(200, content=b'{"data": {"model.name": "gpt"}}')
+    parse_json_response = get_http_target_json_response_callback_function(key='data["model.name"]')
+    assert parse_json_response(mock_response) == "gpt"

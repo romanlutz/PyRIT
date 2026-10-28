@@ -206,10 +206,19 @@ class AzureSpeechAudioToTextConverter(Converter):
         push_stream.write(audio_bytes)
         push_stream.close()
 
-        while not self.done:
+        while not self._recognition_finished():
             time.sleep(0.5)
 
         return "".join(transcribed_text)
+
+    def _recognition_finished(self) -> bool:
+        """
+        Read completion state updated by the speech SDK's callback thread.
+
+        Returns:
+            bool: Whether recognition has finished.
+        """
+        return self.done
 
     def transcript_cb(self, evt: Any, transcript: list[str]) -> None:
         """
@@ -226,8 +235,11 @@ class AzureSpeechAudioToTextConverter(Converter):
         """
         Stop continuous recognition upon receiving an event 'evt'.
 
+        Connected to both ``canceled`` and ``session_stopped``: only a cancellation event carries a
+        ``result`` with cancellation details, a session event (``SessionEventArgs``) has none.
+
         Args:
-            evt (speechsdk.SpeechRecognitionEventArgs): Event.
+            evt (speechsdk.SessionEventArgs): Event, a ``SpeechRecognitionCanceledEventArgs`` on cancellation.
             recognizer (speechsdk.SpeechRecognizer): Speech recognizer object.
 
         Raises:
@@ -246,7 +258,7 @@ class AzureSpeechAudioToTextConverter(Converter):
         logger.info(f"CLOSING on {evt}")
         recognizer.stop_continuous_recognition_async()
         self.done = True
-        if evt.result.reason == speechsdk.ResultReason.Canceled:
+        if isinstance(evt, speechsdk.SpeechRecognitionCanceledEventArgs):
             cancellation_details = evt.result.cancellation_details
             logger.info(f"Speech recognition canceled: {cancellation_details.reason}")
             if cancellation_details.reason == speechsdk.CancellationReason.Error:

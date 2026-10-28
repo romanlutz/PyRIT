@@ -4,21 +4,26 @@
 """Tests for the AttackTechniqueRegistry class."""
 
 import inspect
-from unittest.mock import MagicMock
+from collections.abc import Iterator
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pyrit.executor.attack.core.attack_config import AttackScoringConfig
+from pyrit.memory import MemoryInterface
 from pyrit.models import ComponentIdentifier
-from pyrit.prompt_target import PromptTarget
-from pyrit.registry import TargetRegistry
+from pyrit.prompt_target import PromptTarget, TargetRequirements
+from pyrit.registry import Registry, TargetRegistry
 from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
+from pyrit.scenario import ScenarioTechnique
 from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory, ScorerOverridePolicy
 from pyrit.setup.initializers.techniques import build_technique_factories
 
 
 class _StubAttack:
     """Minimal stub for testing the registry without real AttackStrategy weight."""
+
+    TARGET_REQUIREMENTS: TargetRequirements = TargetRequirements()
 
     def __init__(self, *, objective_target, attack_scoring_config=None, max_turns: int = 5):
         self.objective_target = objective_target
@@ -36,6 +41,8 @@ class _StubAttack:
 class _StubAttackNoScorer:
     """Stub attack that does NOT accept attack_scoring_config."""
 
+    TARGET_REQUIREMENTS: TargetRequirements = TargetRequirements()
+
     def __init__(self, *, objective_target):
         self.objective_target = objective_target
 
@@ -44,6 +51,93 @@ class _StubAttackNoScorer:
             class_name="_StubAttackNoScorer",
             class_module="tests.unit.registry.test_attack_technique_registry",
             params={},
+        )
+
+
+@pytest.fixture
+def scenario_selection_registry(patch_central_database: object) -> Iterator[AttackTechniqueRegistry]:
+    with patch.dict(Registry._singletons, {}, clear=True):
+        registry = AttackTechniqueRegistry.get_registry_singleton()
+        registry.register_from_factories([AttackTechniqueFactory(name="base", attack_class=_StubAttack)])
+        yield registry
+
+
+@AttackTechniqueRegistry.cache_scenario_technique_class
+def _build_selection_enum() -> type[ScenarioTechnique]:
+    registry = AttackTechniqueRegistry.get_registry_singleton()
+    return registry.build_technique_class_from_factories(
+        class_name="RegistrySelectionTechnique", factories=list(registry.get_factories_or_raise().values())
+    )
+
+
+@pytest.mark.parametrize("registration", ["registry", "runtime", "direct"])
+def test_scenario_selection_cache_refreshes_after_registration(
+    *, scenario_selection_registry: AttackTechniqueRegistry, registration: str
+) -> None:
+    before = _build_selection_enum()
+    assert _build_selection_enum() is before
+    factory = AttackTechniqueFactory(name="new", attack_class=_StubAttack)
+    if registration == "registry":
+        scenario_selection_registry.register_technique(name="new", factory=factory)
+    elif registration == "runtime":
+        scenario_selection_registry.instances.register_runtime(factory)
+    else:
+        scenario_selection_registry.instances.register(factory, name="new")
+
+    current = _build_selection_enum()
+    assert current is not before
+    assert current("new").value == "new"
+    assert _build_selection_enum() is current
+    assert "new" not in {technique.value for technique in before.get_all_techniques()}
+    _build_selection_enum.cache_clear()
+    assert _build_selection_enum() is not current
+    assert _build_selection_enum()("new").value == "new"
+
+
+@pytest.mark.parametrize("mutation", ["removal", "reset"])
+def test_scenario_selection_cache_refreshes_after_removal_or_registry_reset(
+    *, scenario_selection_registry: AttackTechniqueRegistry, mutation: str
+) -> None:
+    scenario_selection_registry.register_from_factories([AttackTechniqueFactory(name="new", attack_class=_StubAttack)])
+    before = _build_selection_enum()
+    revision = scenario_selection_registry.catalog_revision
+    if mutation == "removal":
+        scenario_selection_registry.instances.unregister("new")
+        expected_names = {"base"}
+    else:
+        AttackTechniqueRegistry.reset_registry_singleton()
+        replacement = AttackTechniqueRegistry.get_registry_singleton()
+        replacement.register_from_factories(list(scenario_selection_registry.get_factories().values()))
+        assert replacement.catalog_revision[1] == revision[1]
+        assert replacement.catalog_revision != revision
+        expected_names = {"base", "new"}
+
+    current = _build_selection_enum()
+    assert current is not before
+    assert {technique.value for technique in current.get_all_techniques()} == expected_names
+    assert {technique.value for technique in before.get_all_techniques()} == {"base", "new"}
+    assert _build_selection_enum() is current
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["get_all_techniques", "get_aggregate_tags", "resolve", "expand", "tags", "description", "name", "value", "mro"],
+)
+def test_inherited_enum_attributes_fail_before_runtime_registration(
+    *, scenario_selection_registry: AttackTechniqueRegistry, name: str
+) -> None:
+    before = _build_selection_enum()
+    revision = scenario_selection_registry.catalog_revision
+    factory = AttackTechniqueFactory(name=name, attack_class=_StubAttack)
+    with pytest.raises(ValueError, match="inherited ScenarioTechnique attribute"):
+        scenario_selection_registry.instances.register_runtime(factory)
+    assert scenario_selection_registry.catalog_revision == revision
+    assert scenario_selection_registry.instances.get_names() == ["base"]
+    assert _build_selection_enum() is before
+    assert [technique.value for technique in before.get_all_techniques()] == ["base"]
+    with pytest.raises(ValueError, match="inherited ScenarioTechnique attribute"):
+        scenario_selection_registry.build_technique_class_from_factories(
+            class_name="InvalidTechnique", factories=[factory]
         )
 
 
@@ -476,7 +570,7 @@ class TestScorerOverrideTypeInference:
         generic_config = self._make_generic_scoring_config()
         target = MagicMock(spec=PromptTarget)
 
-        mock_memory = MagicMock()
+        mock_memory = MagicMock(spec=MemoryInterface)
         CentralMemory.set_memory_instance(mock_memory)
         try:
             # Should NOT raise — PromptSendingAttack accepts base AttackScoringConfig
@@ -506,7 +600,7 @@ class TestScorerOverrideTypeInference:
         tap_config = TAPAttackScoringConfig(objective_scorer=mock_scorer)
         target = MagicMock(spec=PromptTarget)
 
-        mock_memory = MagicMock()
+        mock_memory = MagicMock(spec=MemoryInterface)
         CentralMemory.set_memory_instance(mock_memory)
         try:
             # TAPAttackScoringConfig is-a AttackScoringConfig, so it passes isinstance check
@@ -578,3 +672,122 @@ class TestScorerOverrideTypeInference:
 
         assert technique is not None
         assert not any("does not accept" in record.message for record in caplog.records)
+
+
+def _make_pool() -> list[AttackTechniqueFactory]:
+    """A small pool of tagged factories for exercising the technique-class builder."""
+    return [
+        AttackTechniqueFactory(name="alpha", attack_class=_StubAttack, technique_tags=["light", "single_turn"]),
+        AttackTechniqueFactory(name="beta", attack_class=_StubAttack, technique_tags=["light", "multi_turn"]),
+        AttackTechniqueFactory(name="gamma", attack_class=_StubAttack, technique_tags=["multi_turn"]),
+    ]
+
+
+class TestBuildTechniqueClassFromFactories:
+    """Tests for the ``build_technique_class_from_factories`` default/aggregate contract."""
+
+    def test_catalog_tags_auto_promote_to_aggregates(self):
+        """Every catalog tag in the pool becomes a selectable aggregate expanding to its techniques."""
+        cls = AttackTechniqueRegistry.build_technique_class_from_factories(
+            class_name="AutoAggTechnique",
+            factories=_make_pool(),
+        )
+        aggregates = cls.get_aggregate_tags()
+        assert {"all", "light", "single_turn", "multi_turn"} <= aggregates
+        assert {c.value for c in cls.expand({cls("light")})} == {"alpha", "beta"}
+
+    def test_default_tags_builds_default_aggregate_and_default_returns_it(self):
+        """``default_tags`` builds the DEFAULT aggregate; ``default()`` returns it, expanding to tagged techniques."""
+        cls = AttackTechniqueRegistry.build_technique_class_from_factories(
+            class_name="DefaultTagsTechnique",
+            factories=_make_pool(),
+            default_tags={"light"},
+        )
+        assert cls.default() == cls("default")
+        assert {c.value for c in cls.expand({cls.default()})} == {"alpha", "beta"}
+
+    def test_default_names_builds_default_aggregate_from_names(self):
+        """``default_names`` builds the DEFAULT aggregate from exact names."""
+        cls = AttackTechniqueRegistry.build_technique_class_from_factories(
+            class_name="DefaultNamesTechnique",
+            factories=_make_pool(),
+            default_names={"gamma"},
+        )
+        assert cls.default() == cls("default")
+        assert {c.value for c in cls.expand({cls.default()})} == {"gamma"}
+
+    def test_no_default_leaves_attribute_unset_and_falls_back_to_all(self):
+        """With no default, the builder records nothing and ``default()`` owns the single ALL fallback."""
+        cls = AttackTechniqueRegistry.build_technique_class_from_factories(
+            class_name="NoDefaultTechnique",
+            factories=_make_pool(),
+        )
+        assert not hasattr(cls, "_default_technique_value")
+        assert "default" not in cls.get_aggregate_tags()
+        assert cls.default() == cls["ALL"]
+
+    def test_default_selection_matching_nothing_falls_back_to_all(self):
+        """A default set that matches no pool technique builds no DEFAULT and falls back to ALL."""
+        cls = AttackTechniqueRegistry.build_technique_class_from_factories(
+            class_name="EmptyDefaultTechnique",
+            factories=_make_pool(),
+            default_tags={"nonexistent"},
+        )
+        assert not hasattr(cls, "_default_technique_value")
+        assert cls.default() == cls["ALL"]
+
+    def test_both_default_tags_and_names_raises(self):
+        """``default_tags`` and ``default_names`` are mutually exclusive."""
+        with pytest.raises(ValueError, match="at most one of default_tags or default_names"):
+            AttackTechniqueRegistry.build_technique_class_from_factories(
+                class_name="BothDefaultsTechnique",
+                factories=_make_pool(),
+                default_tags={"light"},
+                default_names={"gamma"},
+            )
+
+    @pytest.mark.parametrize("name", ["ALL", "all", "DEFAULT", "default"])
+    def test_reserved_factory_name_raises(self, name: str):
+        """Factories cannot shadow the synthetic ALL or DEFAULT members."""
+        factories = [AttackTechniqueFactory(name=name, attack_class=_StubAttack)]
+
+        with pytest.raises(ValueError, match="reserved aggregate"):
+            AttackTechniqueRegistry.build_technique_class_from_factories(
+                class_name="ReservedFactoryTechnique",
+                factories=factories,
+            )
+
+    def test_duplicate_factory_name_raises(self):
+        """Duplicate factory names fail instead of silently overwriting an enum member."""
+        factories = [
+            AttackTechniqueFactory(name="duplicate", attack_class=_StubAttack),
+            AttackTechniqueFactory(name="duplicate", attack_class=_StubAttack),
+        ]
+
+        with pytest.raises(ValueError, match="enum member name 'duplicate'"):
+            AttackTechniqueRegistry.build_technique_class_from_factories(
+                class_name="DuplicateFactoryTechnique",
+                factories=factories,
+            )
+
+    def test_reserved_aggregate_tag_raises(self):
+        """An uppercase reserved tag cannot overwrite the synthetic ALL member."""
+        factories = [AttackTechniqueFactory(name="alpha", attack_class=_StubAttack, technique_tags=["ALL"])]
+
+        with pytest.raises(ValueError, match="enum member name 'ALL'"):
+            AttackTechniqueRegistry.build_technique_class_from_factories(
+                class_name="ReservedTagTechnique",
+                factories=factories,
+            )
+
+    def test_case_colliding_aggregate_tags_raise(self):
+        """Tags that normalize to the same enum member name fail explicitly."""
+        factories = [
+            AttackTechniqueFactory(name="alpha", attack_class=_StubAttack, technique_tags=["foo", "FOO"]),
+        ]
+
+        with pytest.raises(ValueError, match="enum member name 'FOO'"):
+            AttackTechniqueRegistry.build_technique_class_from_factories(
+                class_name="CollidingTagTechnique",
+                factories=factories,
+            )

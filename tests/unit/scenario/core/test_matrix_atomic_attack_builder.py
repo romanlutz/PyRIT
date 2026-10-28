@@ -20,18 +20,22 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyrit.models import AttackSeedGroup, SeedObjective
-from pyrit.prompt_target import PromptTarget
+from pyrit.executor.attack import AttackStrategy, PromptSendingAttack
+from pyrit.models import AttackSeedGroup, AttackTechniqueSeedGroup, SeedGroupRequirements, SeedObjective, SeedPrompt
+from pyrit.prompt_target import CapabilityName, PromptTarget, TargetRequirements
+from pyrit.scenario import IncompatibleTechniqueError, IncompatibleTechniquePolicy
+from pyrit.scenario.core.attack_technique import AttackTechnique
 from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
 from pyrit.scenario.core.matrix_atomic_attack_builder import (
     MatrixAtomicAttackBuilder,
     MatrixCombo,
     build_baseline_atomic_attack,
     build_matrix_atomic_attacks,
-    resolve_technique_factories,
 )
 from pyrit.scenario.core.scenario_context import ScenarioContext
-from pyrit.score import TrueFalseScorer
+from pyrit.scenario.core.technique_requirements import TechniqueRequirements
+from pyrit.score import SubStringScorer, TrueFalseScorer
+from tests.unit.mocks import MockPromptTarget
 
 
 def _mock_factory(*, name: str, seed_technique=None, adversarial_chat=None) -> MagicMock:
@@ -44,11 +48,13 @@ def _mock_factory(*, name: str, seed_technique=None, adversarial_chat=None) -> M
     factory.name = name
     factory.seed_technique = seed_technique
     factory.adversarial_chat = adversarial_chat
+    factory.attack_class = PromptSendingAttack
+    factory.requirements = TechniqueRequirements()
     # Mirror the real factory: with no simulated-conversation seed, resolution returns
     # whatever adversarial_chat was baked (possibly None). Tests that exercise the
     # simulated-conversation lazy path override this return value explicitly.
     factory.resolve_adversarial_chat.return_value = adversarial_chat
-    factory.create.return_value = MagicMock(name=f"{name}_technique")
+    factory.create.return_value = AttackTechnique(attack=MagicMock(spec=AttackStrategy), seed_technique=seed_technique)
     return factory
 
 
@@ -62,6 +68,79 @@ def _builder() -> MatrixAtomicAttackBuilder:
         objective_scorer=MagicMock(spec=TrueFalseScorer),
         memory_labels={"op": "unit"},
     )
+
+
+@pytest.mark.usefixtures("patch_central_database")
+class TestMatrixCompatibilityPolicy:
+    @pytest.mark.parametrize("policy", list(IncompatibleTechniquePolicy))
+    @pytest.mark.parametrize("mismatch", ["target", "dataset"])
+    def test_known_mismatch_follows_policy(
+        self, *, policy: IncompatibleTechniquePolicy, mismatch: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        source = AttackSeedGroup(seeds=[SeedObjective(value="objective"), SeedPrompt(value="context")])
+        requirements = (
+            TechniqueRequirements(
+                objective_target=TargetRequirements(native_required=frozenset({CapabilityName.JSON_OUTPUT}))
+            )
+            if mismatch == "target"
+            else TechniqueRequirements(seed_group=SeedGroupRequirements(objective_only=True))
+        )
+        factory = AttackTechniqueFactory(name="strict", attack_class=PromptSendingAttack, requirements=requirements)
+        builder = MatrixAtomicAttackBuilder(
+            objective_target=MockPromptTarget(),
+            objective_scorer=SubStringScorer(substring="default"),
+            incompatible_technique_policy=policy,
+        )
+        with patch.object(factory, "create", wraps=factory.create) as create:
+            if policy is IncompatibleTechniquePolicy.RAISE:
+                with pytest.raises(IncompatibleTechniqueError, match="strict"):
+                    builder.build(technique_factories={"strict": factory}, dataset_groups={"dataset": [source]})
+            else:
+                atomics = builder.build(
+                    technique_factories={"strict": factory},
+                    dataset_groups={"dataset": [source]},
+                    include_baseline=True,
+                )
+                assert len(atomics) == 1
+                assert atomics[0].seed_groups[0] is source
+                assert "strict" in caplog.text
+            create.assert_not_called()
+
+    @pytest.mark.parametrize("error_type", [TypeError, ValueError])
+    def test_unrelated_factory_error_propagates(self, *, error_type: type[Exception]) -> None:
+        factory = AttackTechniqueFactory(name="broken", attack_class=PromptSendingAttack)
+        builder = MatrixAtomicAttackBuilder(
+            objective_target=MockPromptTarget(), objective_scorer=SubStringScorer(substring="default")
+        )
+        with patch.object(factory, "create", side_effect=error_type("unexpected construction error")):
+            with pytest.raises(error_type, match="unexpected construction error"):
+                builder.build(
+                    technique_factories={"broken": factory},
+                    dataset_groups={"dataset": [_seed_group(objective="objective")]},
+                )
+
+    def test_adaptation_summary_is_not_repeated_for_target_axis(self, caplog: pytest.LogCaptureFixture) -> None:
+        source = AttackSeedGroup(seeds=[SeedObjective(value="objective"), SeedPrompt(value="context")])
+        factory = AttackTechniqueFactory(
+            name="adapted",
+            attack_class=PromptSendingAttack,
+            requirements=TechniqueRequirements(seed_group=SeedGroupRequirements(objective_only=True, try_adapt=True)),
+        )
+        builder = MatrixAtomicAttackBuilder(
+            objective_target=MockPromptTarget(), objective_scorer=SubStringScorer(substring="default")
+        )
+
+        atomics = builder.build(
+            technique_factories={"adapted": factory},
+            dataset_groups={"dataset": [source]},
+            adversarial_targets=[("first", MockPromptTarget()), ("second", MockPromptTarget())],
+        )
+
+        assert len(atomics) == 2
+        assert all(atomic.seed_groups[0] is source for atomic in atomics)
+        summaries = [record for record in caplog.records if record.name.endswith("technique_requirements")]
+        assert len(summaries) == 1
+        assert "1 require objective-only adaptation" in summaries[0].getMessage()
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -170,8 +249,7 @@ class TestMatrixAdversarialForwarding:
             technique_factories={"tech": factory},
             dataset_groups={"ds": [_seed_group(objective="o1")]},
         )
-        # No adversarial_chat is forwarded into create() when the axis is collapsed.
-        assert "adversarial_chat" not in factory.create.call_args.kwargs
+        assert factory.create.call_args.kwargs["adversarial_chat"] is None
         assert result[0]._adversarial_chat is baked
 
     def test_no_target_axis_stamps_factory_resolved_adversarial_chat(self):
@@ -186,7 +264,7 @@ class TestMatrixAdversarialForwarding:
             technique_factories={"tech": factory},
             dataset_groups={"ds": [_seed_group(objective="o1")]},
         )
-        assert "adversarial_chat" not in factory.create.call_args.kwargs
+        assert factory.create.call_args.kwargs["adversarial_chat"] is None
         assert result[0]._adversarial_chat is resolved
 
 
@@ -205,6 +283,7 @@ class TestMatrixCustomCallbacks:
         )
         assert result[0].atomic_attack_name == "advA:tech"
         assert result[0].display_group == "advA"
+        assert result[0].technique_name == "tech"
 
     def test_callbacks_receive_full_combo(self):
         builder = _builder()
@@ -224,25 +303,34 @@ class TestMatrixSeedTechniqueFiltering:
 
     def test_incompatible_pair_is_skipped(self):
         builder = _builder()
-        factory = _mock_factory(name="tech", seed_technique=MagicMock())
-        with patch.object(AttackSeedGroup, "filter_compatible", return_value=[]):
-            result = builder.build(
-                technique_factories={"tech": factory},
-                dataset_groups={"ds": [_seed_group(objective="o1")]},
-            )
+        factory = _mock_factory(
+            name="tech",
+            seed_technique=AttackTechniqueSeedGroup(
+                seeds=[SeedPrompt(value="system framing", role="system", is_general_technique=True)]
+            ),
+        )
+        group = AttackSeedGroup(seeds=[SeedObjective(value="o1"), SeedPrompt(value="user turn", role="user")])
+        result = builder.build(
+            technique_factories={"tech": factory},
+            dataset_groups={"ds": [group]},
+        )
         assert result == []
         factory.create.assert_not_called()
 
     def test_partial_filter_keeps_subset(self):
         builder = _builder()
-        factory = _mock_factory(name="tech", seed_technique=MagicMock())
+        factory = _mock_factory(
+            name="tech",
+            seed_technique=AttackTechniqueSeedGroup(
+                seeds=[SeedPrompt(value="system framing", role="system", is_general_technique=True)]
+            ),
+        )
         kept = _seed_group(objective="keep")
-        dropped = _seed_group(objective="drop")
-        with patch.object(AttackSeedGroup, "filter_compatible", return_value=[kept]):
-            result = builder.build(
-                technique_factories={"tech": factory},
-                dataset_groups={"ds": [kept, dropped]},
-            )
+        dropped = AttackSeedGroup(seeds=[SeedObjective(value="drop"), SeedPrompt(value="user turn", role="user")])
+        result = builder.build(
+            technique_factories={"tech": factory},
+            dataset_groups={"ds": [kept, dropped]},
+        )
         assert len(result) == 1
         assert result[0]._seed_groups == [kept]
 
@@ -305,6 +393,20 @@ class TestBuildBaselineHelper:
         assert baseline.atomic_attack_name == "baseline"
         assert baseline._seed_groups == groups
 
+    def test_baseline_custom_name_scorer_and_display_group(self):
+        scorer = MagicMock(spec=TrueFalseScorer)
+        groups = [_seed_group(objective="o1")]
+        baseline = build_baseline_atomic_attack(
+            objective_target=MagicMock(spec=PromptTarget),
+            objective_scorer=scorer,
+            seed_groups=groups,
+            atomic_attack_name="harm_a_baseline",
+            display_group="harm_a",
+        )
+        assert baseline.atomic_attack_name == "harm_a_baseline"
+        assert baseline.display_group == "harm_a"
+        assert baseline._objective_scorer is scorer
+
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestMatrixTechniqueConverters:
@@ -352,12 +454,13 @@ def _technique(value: str) -> SimpleNamespace:
     return SimpleNamespace(value=value)
 
 
-def _context(*, techniques, seed_groups_by_dataset=None) -> ScenarioContext:
+def _context(*, techniques, seed_groups_by_dataset=None, include_baseline=False) -> ScenarioContext:
     return ScenarioContext(
         objective_target=MagicMock(spec=PromptTarget),
         scenario_techniques=techniques,
         dataset_config=MagicMock(),
         memory_labels={"op": "unit"},
+        include_baseline=include_baseline,
         seed_groups_by_dataset=seed_groups_by_dataset or {},
     )
 
@@ -372,45 +475,55 @@ def _patch_registry(factories: dict):
 
 
 @pytest.mark.usefixtures("patch_central_database")
-class TestResolveTechniqueFactories:
-    """``resolve_technique_factories`` filters the registry to the selected techniques."""
+class TestLegacyReExports:
+    """Ensure backward compatibility of re-exports in matrix_atomic_attack_builder and pyrit.scenario.core."""
 
-    def test_keeps_only_selected_in_order(self):
-        factories = {
-            "alpha": _mock_factory(name="alpha"),
-            "beta": _mock_factory(name="beta"),
-            "gamma": _mock_factory(name="gamma"),
-        }
-        context = _context(techniques=[_technique("beta"), _technique("alpha")])
-        with _patch_registry(factories):
-            resolved = resolve_technique_factories(context=context)
-        assert list(resolved.keys()) == ["beta", "alpha"]
+    def test_legacy_re_exports_are_identical_objects(self):
+        import pyrit.scenario.core as scenario_core
+        import pyrit.scenario.core._technique_resolution as new_module
+        import pyrit.scenario.core.matrix_atomic_attack_builder as legacy_module
 
-    def test_drops_techniques_without_factory(self):
-        factories = {"alpha": _mock_factory(name="alpha")}
-        context = _context(techniques=[_technique("alpha"), _technique("missing")])
-        with _patch_registry(factories):
-            resolved = resolve_technique_factories(context=context)
-        assert list(resolved.keys()) == ["alpha"]
-
-    def test_extra_factories_merged_and_override_registry(self):
-        registry_factories = {"alpha": _mock_factory(name="alpha")}
-        local_alpha = _mock_factory(name="alpha")
-        local_only = _mock_factory(name="local")
-        context = _context(techniques=[_technique("alpha"), _technique("local")])
-        with _patch_registry(registry_factories):
-            resolved = resolve_technique_factories(
-                context=context,
-                extra_factories={"alpha": local_alpha, "local": local_only},
-            )
-        assert list(resolved.keys()) == ["alpha", "local"]
-        assert resolved["alpha"] is local_alpha  # extra overrides the registry factory of the same name
-        assert resolved["local"] is local_only  # local-only factory is selectable without global registration
+        assert legacy_module.TechniqueResolutionError is new_module.TechniqueResolutionError
+        assert legacy_module.resolve_technique_factories is new_module.resolve_technique_factories
+        assert (
+            legacy_module.resolve_technique_factories_for_techniques
+            is new_module.resolve_technique_factories_for_techniques
+        )
+        assert scenario_core.TechniqueResolutionError is new_module.TechniqueResolutionError
+        assert scenario_core.resolve_technique_factories is new_module.resolve_technique_factories
+        assert (
+            scenario_core.resolve_technique_factories_for_techniques
+            is new_module.resolve_technique_factories_for_techniques
+        )
 
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestBuildMatrixAtomicAttacks:
     """``build_matrix_atomic_attacks`` wires the context into the builder in one call."""
+
+    @pytest.mark.parametrize("override", [False, True])
+    def test_context_converters_are_used_unless_explicitly_overridden(self, override: bool) -> None:
+        from pyrit.converter import Base64Converter
+
+        converter = Base64Converter()
+        context = _context(
+            techniques=[_technique("tech")],
+            seed_groups_by_dataset={"ds": [_seed_group(objective="o1")]},
+        )
+        context.technique_converters["tech"] = [converter]
+        factory = _mock_factory(name="tech")
+        with _patch_registry({"tech": factory}):
+            build_matrix_atomic_attacks(
+                context=context,
+                objective_scorer=MagicMock(spec=TrueFalseScorer),
+                technique_converters={} if override else None,
+            )
+        extra = factory.create.call_args.kwargs["extra_request_converters"]
+        if override:
+            assert extra is None
+        else:
+            assert extra is not None
+            assert extra[0].converters == [converter]
 
     def test_builds_cross_product_grouped_by_technique(self):
         context = _context(
@@ -435,14 +548,26 @@ class TestBuildMatrixAtomicAttacks:
             )
         assert result[0].display_group == "ds"
 
-    def test_no_baseline_emitted(self):
+    def test_no_baseline_emitted_when_context_disables_it(self):
         context = _context(
             techniques=[_technique("tech")],
             seed_groups_by_dataset={"ds": [_seed_group(objective="o1")]},
+            include_baseline=False,
         )
         with _patch_registry({"tech": _mock_factory(name="tech")}):
             result = build_matrix_atomic_attacks(context=context, objective_scorer=MagicMock(spec=TrueFalseScorer))
         assert all(a.atomic_attack_name != "baseline" for a in result)
+
+    def test_baseline_emitted_when_context_enables_it(self):
+        context = _context(
+            techniques=[_technique("tech")],
+            seed_groups_by_dataset={"ds": [_seed_group(objective="o1")]},
+            include_baseline=True,
+        )
+        with _patch_registry({"tech": _mock_factory(name="tech")}):
+            result = build_matrix_atomic_attacks(context=context, objective_scorer=MagicMock(spec=TrueFalseScorer))
+        assert result[0].atomic_attack_name == "baseline"
+        assert [a.atomic_attack_name for a in result] == ["baseline", "tech_ds"]
 
     def test_technique_converters_forwarded(self):
         from pyrit.converter import Converter

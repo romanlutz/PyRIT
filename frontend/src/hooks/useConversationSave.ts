@@ -1,0 +1,78 @@
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+
+import { attacksApi } from '@/services/api'
+import type { AddMessageResponse, ConversationSaveInput, NewAttackContext, SaveConversationRequest } from '@/types'
+import { generateClientId } from '@/utils/clientId'
+import { serializeDraft } from '@/utils/conversationDraft'
+
+export function useConversationSave(newAttackContext?: NewAttackContext) {
+  const [saving, setSaving] = useState(false)
+  const pending = useRef(false)
+  const mounted = useRef(true)
+  const attempt = useRef<{ signature: string; id: string } | null>(null)
+  const contextRef = useRef(newAttackContext)
+  useLayoutEffect(() => { contextRef.current = newAttackContext }, [newAttackContext])
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
+
+  const save = useCallback(async (
+    input: ConversationSaveInput,
+    destination: SaveConversationRequest['destination'],
+    reuseUnsentConversation = false,
+    preparationContext?: NewAttackContext,
+  ): Promise<AddMessageResponse> => {
+    if (pending.current) throw new Error('A conversation save is already in progress.')
+    pending.current = true
+    setSaving(true)
+    try {
+      const initialContext = destination === 'new_attack' ? preparationContext ?? contextRef.current : undefined
+      if (initialContext && !initialContext.ready) {
+        throw new Error('Default labels are not ready. Retry after default labels finish loading.')
+      }
+      const objective = input.objective.trim()
+      const updatesObjective = destination === 'same_attack' && objective !== input.initialObjective
+      const messages = await serializeDraft(input.messages)
+      const currentContext = destination === 'new_attack' ? contextRef.current : undefined
+      if (initialContext && (!currentContext?.ready || initialContext.generation !== currentContext.generation)) {
+        throw new Error('Runtime or default labels changed while preparing this conversation. Your draft is preserved. Retry after default labels finish loading.')
+      }
+      const labels = currentContext ? currentContext.labels : input.labels
+      const operationId = currentContext?.operationId ?? undefined
+      const payload = {
+        destination,
+        attack_result_id: destination === 'same_attack' ? input.sourceAttackId ?? undefined : undefined,
+        source_attack_result_id: input.sourceConversationId ? input.sourceAttackId ?? undefined : undefined,
+        source_conversation_id: input.sourceConversationId ?? undefined,
+        expected_objective: updatesObjective ? input.initialObjective : undefined,
+        objective: destination === 'new_attack' || updatesObjective ? objective : undefined,
+        target_registry_name: input.target?.target_registry_name,
+        ...(input.target?.binding ? { target_binding: input.target.binding } : {}),
+        operator: labels?.operator,
+        operation_id: operationId,
+        labels,
+        messages,
+        ...(destination === 'new_attack' && currentContext?.chatScorer !== undefined
+          && (objective || currentContext.chatScorerExplicit || currentContext.chatScorer === null)
+          ? { chat_scorer: currentContext.chatScorer } : {}),
+        ...(updatesObjective && !input.initialObjective.trim() && contextRef.current?.chatScorer
+          ? { default_chat_scorer: contextRef.current.chatScorer } : {}),
+        ...(reuseUnsentConversation ? {
+          reuse_unsent_conversation: true,
+          expected_source_piece_ids: input.sourcePieceIds ?? [],
+        } : {}),
+      }
+      const signature = JSON.stringify(payload)
+      if (attempt.current?.signature !== signature) attempt.current = { signature, id: generateClientId() }
+      const response = await attacksApi.saveConversation({ ...payload, save_id: attempt.current.id })
+      attempt.current = null
+      return response
+    } finally {
+      pending.current = false
+      if (mounted.current) setSaving(false)
+    }
+  }, [])
+
+  return { save, saving }
+}

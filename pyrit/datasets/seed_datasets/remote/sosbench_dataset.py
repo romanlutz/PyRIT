@@ -50,7 +50,7 @@ class _SOSBenchDataset(_RemoteDatasetLoader):
         return "sosbench"
 
     @override
-    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
+    async def _fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch SOSBench dataset and return as SeedDataset.
 
@@ -110,6 +110,7 @@ class _SOSBenchDataset(_RemoteDatasetLoader):
                     "Fengbo Ma",
                     "Zhangchen Xu",
                     "Yuetai Li",
+                    "Zixin Rao",
                     "Bhaskar Ramasubramanian",
                     "Luyao Niu",
                     "Bo Li",

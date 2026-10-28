@@ -9,12 +9,41 @@ scenario that builds a technique class via the technique registry. Adding a
 new technique to the catalog should not require updating these tests.
 """
 
+from typing import assert_type
 from unittest.mock import patch
 
 import pytest
 
 from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
 from pyrit.scenario.core.scenario_technique import ScenarioTechnique
+
+
+class _TypedTechnique(ScenarioTechnique):
+    ALL = ("all", {"all"})
+    First = ("first", {"simple"})
+    Second = ("second", {"complex"})
+
+
+def test_technique_methods_preserve_concrete_member_types() -> None:
+    default = _TypedTechnique.default()
+    concrete = _TypedTechnique.get_all_techniques()
+    aggregates = _TypedTechnique.get_aggregate_techniques()
+    tagged = _TypedTechnique.get_techniques_by_tag("simple")
+    expanded = _TypedTechnique.expand({_TypedTechnique.ALL})
+    resolved = _TypedTechnique.resolve(None, default=_TypedTechnique.ALL)
+
+    assert_type(default, _TypedTechnique)
+    assert_type(concrete, list[_TypedTechnique])
+    assert_type(aggregates, list[_TypedTechnique])
+    assert_type(tagged, set[_TypedTechnique])
+    assert_type(expanded, list[_TypedTechnique])
+    assert_type(resolved, list[_TypedTechnique])
+    assert default is _TypedTechnique.ALL
+    assert concrete == [_TypedTechnique.First, _TypedTechnique.Second]
+    assert aggregates == [_TypedTechnique.ALL]
+    assert tagged == {_TypedTechnique.First}
+    assert expanded == resolved == concrete
+
 
 # ---------------------------------------------------------------------------
 # Synthetic many-shot examples — prevents reading the real JSON during tests
@@ -181,6 +210,27 @@ def test_aggregates_are_disjoint_from_techniques(get_technique):
     agg_values = {s.value for s in strat.get_aggregate_techniques()}
     tech_values = {s.value for s in strat.get_all_techniques()}
     assert agg_values.isdisjoint(tech_values)
+
+
+@pytest.mark.parametrize("get_technique", SCENARIO_STRATEGY_BUILDERS)
+def test_catalog_tags_are_selectable_aggregates(get_technique):
+    """Every catalog tag carried by a pool technique is itself a selectable aggregate
+    that expands to exactly the techniques carrying it (tags are synonymous with
+    aggregates). ``all`` and ``default`` are reserved synthetic aggregates, and a tag
+    that collides with a technique name stays a concrete technique, so both are excluded.
+    """
+    strat = get_technique()
+    reserved = {"all", "default"}
+    technique_values = {s.value for s in strat.get_all_techniques()}
+    catalog_tags = {tag for s in strat.get_all_techniques() for tag in s.tags} - reserved - technique_values
+    assert catalog_tags, "expected at least one catalog tag to promote"
+
+    aggregate_values = {s.value for s in strat.get_aggregate_techniques()}
+    for tag in catalog_tags:
+        assert tag in aggregate_values, f"catalog tag {tag!r} is not a selectable aggregate"
+        expanded = set(strat.expand({strat(tag)}))
+        expected = {s for s in strat.get_all_techniques() if tag in s.tags}
+        assert expanded == expected, f"aggregate {tag!r} did not expand to its tagged techniques"
 
 
 @pytest.mark.parametrize("get_technique", SCENARIO_STRATEGY_BUILDERS)

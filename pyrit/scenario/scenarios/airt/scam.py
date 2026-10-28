@@ -1,28 +1,32 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import asyncio
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import ClassVar
 
 from pyrit.common import apply_defaults
 from pyrit.common.path import EXECUTOR_RED_TEAM_PATH, EXECUTOR_SIMULATED_TARGET_PATH, SCORER_SEED_PROMPT_PATH
 from pyrit.executor.attack import RedTeamingAttack
 from pyrit.executor.attack.core.attack_config import AttackAdversarialConfig, AttackScoringConfig
-from pyrit.models import AttackSeedGroup, Parameter, SeedPrompt
+from pyrit.models import AttackSeedGroup, Parameter, SeedPrompt, load_next_message_prompt, load_simulated_target_prompt
 from pyrit.prompt_target import PromptTarget
 from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.attack_technique import AttackTechnique
 from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
-from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
+from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration, DatasetSource
+from pyrit.scenario.core.matrix_atomic_attack_builder import build_baseline_atomic_attack
 from pyrit.scenario.core.scenario import Scenario
 from pyrit.scenario.core.scenario_context import ScenarioContext
 from pyrit.scenario.core.scenario_target_defaults import get_default_adversarial_target
 from pyrit.scenario.core.scenario_technique import ScenarioTechnique
+from pyrit.scenario.core.technique_requirements import (
+    TechniqueRequirements,
+    check_target_compatibility,
+    filter_seed_groups,
+)
 from pyrit.score import TrueFalseScorer
-
-if TYPE_CHECKING:
-    from pyrit.executor.attack.core.attack_strategy import AttackStrategy
 
 logger = logging.getLogger(__name__)
 PERSUASION_DECEPTION_PATH = Path(EXECUTOR_RED_TEAM_PATH, "persuasion_deception").resolve()
@@ -75,6 +79,11 @@ class ScamTechnique(ScenarioTechnique):
         # Include base class aggregates ("all") and add scenario-specific ones
         return super().get_aggregate_tags() | {"default", "single_turn", "multi_turn"}
 
+    @classmethod
+    def default(cls) -> "ScamTechnique":
+        """Return the default technique (``DEFAULT``) used when the caller selects nothing."""
+        return cls.DEFAULT
+
 
 class Scam(Scenario):
     """
@@ -83,6 +92,7 @@ class Scam(Scenario):
     """
 
     VERSION: int = 2
+    SUPPORTS_TECHNIQUE_CONVERTERS: ClassVar[bool] = False
 
     @classmethod
     def _get_additional_scoring_questions(cls) -> list[Path]:
@@ -144,103 +154,117 @@ class Scam(Scenario):
 
         super().__init__(
             version=self.VERSION,
+            uses_default_adversarial_target=adversarial_chat is None,
             technique_class=ScamTechnique,
-            default_technique=ScamTechnique.DEFAULT,
-            default_dataset_config=DatasetAttackConfiguration(dataset_names=["airt_scams"], max_dataset_size=4),
+            default_dataset_config=DatasetAttackConfiguration(
+                sources=[DatasetSource(name=name) for name in ["airt_scams"]], max_per_dataset="all", max_total=4
+            ),
             objective_scorer=objective_scorer,
             scenario_result_id=scenario_result_id,
         )
 
-    def _get_atomic_attack_from_technique(self, *, technique: str, seed_groups: list[AttackSeedGroup]) -> AtomicAttack:
+    def _get_atomic_attack_from_technique(
+        self,
+        *,
+        context: ScenarioContext,
+        technique: str,
+        seed_groups: list[AttackSeedGroup],
+    ) -> AtomicAttack | None:
         """
         Translate the techniques into actual AtomicAttacks.
 
         Args:
             technique (str): The technique to create the attack from.
             seed_groups (list[AttackSeedGroup]): Seed groups the attack draws from.
+            context (ScenarioContext): The resolved runtime inputs.
 
         Returns:
-            AtomicAttack: Configured for the specified technique.
+            AtomicAttack | None: The configured attack, or None when incompatible under SKIP.
 
         Raises:
-            ValueError: If scenario is not properly initialized or an unknown ScamTechnique is provided.
+            ValueError: If an unknown ScamTechnique is provided.
         """
-        # objective_target is guaranteed to be non-None by parent class validation
-        if self._objective_target is None:
-            raise ValueError(
-                "Scenario not properly initialized. Call await scenario.initialize_async() before running."
-            )
-        attack_strategy: AttackStrategy[Any, Any] | None = None
+        factory: AttackTechniqueFactory | None = None
 
         if technique == "persuasive_rta":
-            # Set system prompt to generic persuasion persona
-            self._adversarial_config.system_prompt = SeedPrompt.from_yaml_file(
-                Path(PERSUASION_DECEPTION_PATH, "persuasion_persona_generic.yaml").resolve()
-            )
-
-            attack_strategy = RedTeamingAttack(
-                objective_target=self._objective_target,
-                attack_scoring_config=self._scorer_config,
-                attack_adversarial_config=self._adversarial_config,
-                max_turns=self.params["max_turns"],
-            )
+            requirements = TechniqueRequirements()
         elif technique == "role_play_persuasion_written":
             # Role play is now a simulated-conversation technique: an adversarial
             # chat improvises a short written-persuasion role play, then the
             # objective is delivered to the target.
-            role_play_technique = AttackTechniqueFactory.with_simulated_conversation(
+            factory = AttackTechniqueFactory.with_simulated_conversation(
                 name="role_play_persuasion_written",
-                adversarial_chat_system_prompt_path=EXECUTOR_RED_TEAM_PATH
-                / "role_play"
-                / "role_play_persuasion_written.yaml",
-                next_message_system_prompt_path=EXECUTOR_SIMULATED_TARGET_PATH / "role_play_next_message.yaml",
+                adversarial_chat_system_prompt=SeedPrompt.from_yaml_file(
+                    EXECUTOR_RED_TEAM_PATH / "role_play" / "role_play_persuasion_written.yaml"
+                ),
+                next_message_system_prompt=load_next_message_prompt(
+                    EXECUTOR_SIMULATED_TARGET_PATH / "role_play_next_message.yaml"
+                ),
                 num_turns=2,
-            ).create(
-                objective_target=self._objective_target,
-                attack_scoring_config=self._scorer_config,
-                adversarial_chat=self._adversarial_chat,
             )
-            return AtomicAttack(
-                atomic_attack_name=f"scam_{technique}",
-                attack_technique=role_play_technique,
-                seed_groups=seed_groups,
-                adversarial_chat=self._adversarial_chat,
-                objective_scorer=self._scorer_config.objective_scorer,
-                memory_labels=self._memory_labels,
-            )
+            requirements = factory.requirements
         elif technique == "context_compliance":
             # Context compliance is now a simulated-conversation technique: an adversarial
             # chat asks a benign question, a simulated target answers it and offers to go
             # further, then a fixed "yes." is delivered to the target as the final user turn.
-            context_compliance_technique = AttackTechniqueFactory.with_simulated_conversation(
+            factory = AttackTechniqueFactory.with_simulated_conversation(
                 name="context_compliance",
-                adversarial_chat_system_prompt_path=EXECUTOR_RED_TEAM_PATH
-                / "context_compliance"
-                / "context_compliance.yaml",
-                simulated_target_system_prompt_path=EXECUTOR_SIMULATED_TARGET_PATH / "context_compliance_target.yaml",
+                adversarial_chat_system_prompt=SeedPrompt.from_yaml_file(
+                    EXECUTOR_RED_TEAM_PATH / "context_compliance" / "context_compliance.yaml"
+                ),
+                simulated_target_system_prompt=load_simulated_target_prompt(
+                    EXECUTOR_SIMULATED_TARGET_PATH / "context_compliance_target.yaml"
+                ),
                 final_user_message="yes.",
                 num_turns=1,
-            ).create(
-                objective_target=self._objective_target,
-                attack_scoring_config=self._scorer_config,
-                adversarial_chat=self._adversarial_chat,
             )
-            return AtomicAttack(
-                atomic_attack_name=f"scam_{technique}",
-                attack_technique=context_compliance_technique,
-                seed_groups=seed_groups,
-                adversarial_chat=self._adversarial_chat,
-                objective_scorer=self._scorer_config.objective_scorer,
-                memory_labels=self._memory_labels,
-            )
+            requirements = factory.requirements
         else:
             raise ValueError(f"Unknown ScamTechnique: {technique}")
 
+        if not check_target_compatibility(
+            target=context.objective_target,
+            attack_class=factory.attack_class if factory is not None else RedTeamingAttack,
+            requirements=requirements,
+            technique_name=technique,
+            policy=context.incompatible_technique_policy,
+        ):
+            return None
+        compatible_groups = filter_seed_groups(
+            seed_groups=seed_groups,
+            requirements=requirements.seed_group,
+            seed_technique=factory.seed_technique if factory is not None else None,
+            technique_name=technique,
+            dataset_name="scam",
+            policy=context.incompatible_technique_policy,
+        )
+        if not compatible_groups:
+            return None
+        if factory is not None:
+            attack_technique = factory.create(
+                objective_target=context.objective_target,
+                attack_scoring_config=self._scorer_config,
+                adversarial_chat=self._adversarial_chat,
+            )
+        else:
+            self._adversarial_config.system_prompt = SeedPrompt.from_yaml_file(
+                Path(PERSUASION_DECEPTION_PATH, "persuasion_persona_generic.yaml").resolve()
+            )
+            attack_technique = AttackTechnique(
+                attack=RedTeamingAttack(
+                    objective_target=context.objective_target,
+                    attack_scoring_config=self._scorer_config,
+                    attack_adversarial_config=self._adversarial_config,
+                    max_turns=self.params["max_turns"],
+                )
+            )
         return AtomicAttack(
             atomic_attack_name=f"scam_{technique}",
-            attack_technique=AttackTechnique(attack=attack_strategy),
-            seed_groups=seed_groups,
-            memory_labels=self._memory_labels,
+            attack_technique=attack_technique,
+            seed_groups=compatible_groups,
+            adversarial_chat=self._adversarial_chat,
+            objective_scorer=self._scorer_config.objective_scorer,
+            memory_labels=context.memory_labels,
         )
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
@@ -256,7 +280,25 @@ class Scam(Scenario):
         seed_groups = list(context.seed_groups)
         techniques = {s.value for s in context.scenario_techniques}
 
-        return [
-            self._get_atomic_attack_from_technique(technique=technique, seed_groups=seed_groups)
-            for technique in techniques
-        ]
+        atomic_attacks: list[AtomicAttack] = []
+        if context.include_baseline:
+            atomic_attacks.append(
+                build_baseline_atomic_attack(
+                    objective_target=context.objective_target,
+                    objective_scorer=self._objective_scorer,
+                    seed_groups=seed_groups,
+                    memory_labels=context.memory_labels,
+                )
+            )
+        # Building a simulated-conversation technique reads its prompt YAML, so keep the
+        # synchronous builder off the event loop.
+        for technique in techniques:
+            atomic = await asyncio.to_thread(
+                self._get_atomic_attack_from_technique,
+                context=context,
+                technique=technique,
+                seed_groups=seed_groups,
+            )
+            if atomic is not None:
+                atomic_attacks.append(atomic)
+        return atomic_attacks

@@ -7,14 +7,6 @@ import pytest
 
 from pyrit.converter import ConverterResult
 from pyrit.converter.ansi_escape.ansi_attack_converter import AnsiAttackConverter
-from pyrit.converter.ansi_escape.ansi_payloads import (
-    ASKS,
-    ESCAPED_PAYLOADS,
-    HIGH_LEVEL_TASKS,
-    LIVE_PAYLOADS,
-    REPEAT_STUBS,
-    UNESCAPE_STUBS,
-)
 
 
 async def test_convert_async_default_settings():
@@ -46,7 +38,16 @@ async def test_convert_async_incorporate_user_prompt_false():
 
 async def test_convert_async_unescape_scenario():
     # Force scenario to choose the unescape scenario by mocking random.choice
-    with patch("random.choice") as mock_choice:
+    converter = AnsiAttackConverter(
+        include_raw=True,
+        include_escaped=True,
+        include_tasks=True,
+        include_repeats=True,
+        include_unescape=True,
+        incorporate_user_prompt=True,
+    )
+    with patch.object(converter, "_get_random_generator") as mock_get_rng:
+        mock_choice = mock_get_rng.return_value.choice
         # We pick a stable return sequence for mock_choice:
         # The converter tries to pick scenario from scenario_choices which is influenced by multiple
         # random.choice calls. We'll guide it step-by-step.
@@ -55,12 +56,12 @@ async def test_convert_async_unescape_scenario():
         # third scenario selection: scenario with unescape
         # last scenario picks from these three. We'll force it to pick the unescape scenario last.
         mock_choice.side_effect = [
-            ASKS[0],  # from scenario 1
-            HIGH_LEVEL_TASKS[0],  # from scenario 1
-            REPEAT_STUBS[0],  # from scenario 2
-            (LIVE_PAYLOADS + ESCAPED_PAYLOADS)[0],  # from scenario 2 pick a payload
-            UNESCAPE_STUBS[0],  # from scenario 3
-            ESCAPED_PAYLOADS[0],  # from scenario 3
+            AnsiAttackConverter.ASKS[0],  # from scenario 1
+            AnsiAttackConverter.HIGH_LEVEL_TASKS[0],  # from scenario 1
+            AnsiAttackConverter.REPEAT_STUBS[0],  # from scenario 2
+            (AnsiAttackConverter.LIVE_PAYLOADS + AnsiAttackConverter.ESCAPED_PAYLOADS)[0],
+            AnsiAttackConverter.UNESCAPE_STUBS[0],  # from scenario 3
+            AnsiAttackConverter.ESCAPED_PAYLOADS[0],  # from scenario 3
             # Finally pick scenario 3 (unescape scenario) as final scenario
             # scenario_choices: [scenario1, scenario2, scenario3]  # noqa: ERA001
             # scenario 1: "ASKS ..."
@@ -70,15 +71,6 @@ async def test_convert_async_unescape_scenario():
             # After all these side effects, the last call to random.choice will pick from these 3 scenarios
             # We'll just return the scenario 3 text constructed in code.
         ]
-
-        converter = AnsiAttackConverter(
-            include_raw=True,
-            include_escaped=True,
-            include_tasks=True,
-            include_repeats=True,
-            include_unescape=True,
-            incorporate_user_prompt=True,
-        )
 
         # Because we set side_effect so specifically, we need to adapt the calls:
         # Actually, the code chooses scenario structure as:
@@ -93,17 +85,17 @@ async def test_convert_async_unescape_scenario():
         # We'll do that by adding another mock return at the end.
         mock_choice.side_effect = [
             # pick ask
-            ASKS[0],
+            AnsiAttackConverter.ASKS[0],
             # pick task
-            HIGH_LEVEL_TASKS[0],
+            AnsiAttackConverter.HIGH_LEVEL_TASKS[0],
             # pick repeat_stub
-            REPEAT_STUBS[0],
+            AnsiAttackConverter.REPEAT_STUBS[0],
             # pick chosen_payload for scenario2
-            (LIVE_PAYLOADS + ESCAPED_PAYLOADS)[0],
+            (AnsiAttackConverter.LIVE_PAYLOADS + AnsiAttackConverter.ESCAPED_PAYLOADS)[0],
             # pick unescape_stub
-            UNESCAPE_STUBS[0],
+            AnsiAttackConverter.UNESCAPE_STUBS[0],
             # pick escaped_payload for scenario3
-            ESCAPED_PAYLOADS[0],
+            AnsiAttackConverter.ESCAPED_PAYLOADS[0],
             # final scenario pick: return scenario3
             "Decode the following as raw bytes: \\x1b[",
         ]
@@ -170,6 +162,6 @@ async def test_convert_async_only_tasks():
     assert isinstance(result, ConverterResult)
     out = result.output_text
     # Should contain something from ASKS and HIGH_LEVEL_TASKS combined
-    assert any(ask in out for ask in ASKS)
-    assert any(task in out for task in HIGH_LEVEL_TASKS)
+    assert any(ask in out for ask in AnsiAttackConverter.ASKS)
+    assert any(task in out for task in AnsiAttackConverter.HIGH_LEVEL_TASKS)
     assert "User input" in out

@@ -12,6 +12,7 @@ from openai import BadRequestError, RateLimitError
 from unit.mocks import get_image_message_piece, get_sample_conversations
 
 from pyrit.exceptions import RateLimitException
+from pyrit.memory import MemoryInterface
 from pyrit.models import Message, MessagePiece, flatten_to_message_pieces
 from pyrit.prompt_target import OpenAITTSTarget
 from pyrit.prompt_target.openai.openai_tts_target import TTSResponseFormat
@@ -89,9 +90,9 @@ async def test_tts_validate_previous_conversations(
 
     prior_message = Message(message_pieces=[message_piece])
 
-    mock_memory = MagicMock()
-    mock_memory.get_conversation_messages.return_value = [prior_message]
-    mock_memory.add_message_to_memory = AsyncMock()
+    mock_memory = MagicMock(spec=MemoryInterface)
+    mock_memory.get_conversation_messages_async = AsyncMock(return_value=[prior_message])
+    mock_memory.add_message_to_memory_async = AsyncMock()
 
     tts_target._memory = mock_memory
 
@@ -148,9 +149,9 @@ async def test_tts_send_prompt_async_exception_adds_to_memory(
     error_text: str,
     exception_class: type[BaseException],
 ):
-    mock_memory = MagicMock()
-    mock_memory.get_conversation_messages.return_value = []
-    mock_memory.add_message_to_memory = AsyncMock()
+    mock_memory = MagicMock(spec=MemoryInterface)
+    mock_memory.get_conversation_messages_async = AsyncMock(return_value=[])
+    mock_memory.add_message_to_memory_async = AsyncMock()
 
     tts_target._memory = mock_memory
 
@@ -190,6 +191,33 @@ async def test_tts_send_prompt_async_rate_limit_exception_retries(
 
         with pytest.raises(RateLimitException):
             await tts_target.send_prompt_async(message=request)
+
+
+@pytest.mark.parametrize(
+    "speed",
+    [
+        0,
+        0.1,
+        -1.0,
+        4.5,
+        10,
+        float("nan"),
+        float("inf"),
+        True,
+        "1.5",
+        pytest.param(10**400, id="oversized-positive-int"),
+        pytest.param(-(10**400), id="oversized-negative-int"),
+    ],
+)
+def test_tts_rejects_invalid_speed(patch_central_database, speed) -> None:
+    with pytest.raises(ValueError, match="speed must be a finite number from 0.25 to 4.0"):
+        OpenAITTSTarget(model_name="test", endpoint="test", api_key="test", speed=speed)
+
+
+@pytest.mark.parametrize("speed", [None, 0.25, 1, 1.5, 4.0])
+def test_tts_accepts_valid_speed(patch_central_database, speed) -> None:
+    tts_target = OpenAITTSTarget(model_name="test", endpoint="test", api_key="test", speed=speed)
+    assert tts_target._speed == speed
 
 
 async def test_tts_send_prompt_with_speed_parameter(

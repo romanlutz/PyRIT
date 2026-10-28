@@ -4,13 +4,21 @@
 import logging
 from typing import Any
 
+from pyrit.common import forward_init_parameters
 from pyrit.exceptions.exception_classes import (
     pyrit_target_retry,
 )
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
-from pyrit.prompt_target.common.utils import limit_requests_per_minute
+from pyrit.prompt_target.common.utils import (
+    limit_requests_per_minute,
+    validate_frequency_penalty,
+    validate_presence_penalty,
+    validate_temperature,
+    validate_top_p,
+)
+from pyrit.prompt_target.openai._response_adapter import CompletionsResponseAdapter
 from pyrit.prompt_target.openai.openai_target import OpenAITarget
 
 logger = logging.getLogger(__name__)
@@ -20,7 +28,9 @@ class OpenAICompletionTarget(OpenAITarget):
     """A prompt target for OpenAI completion endpoints."""
 
     _DEFAULT_CONFIGURATION: TargetConfiguration = TargetConfiguration(capabilities=TargetCapabilities())
+    _response_adapter = CompletionsResponseAdapter()
 
+    @forward_init_parameters
     def __init__(
         self,
         *,
@@ -66,10 +76,20 @@ class OpenAICompletionTarget(OpenAITarget):
             custom_configuration (TargetConfiguration, Optional): Override the default configuration for
                 this target instance. Defaults to None.
             **kwargs: Additional keyword arguments passed to the parent OpenAITarget class.
-            httpx_client_kwargs (dict, Optional): Additional kwargs to be passed to the ``httpx.AsyncClient()``
-                constructor. For example, to specify a 3 minute timeout: ``httpx_client_kwargs={"timeout": 180}``
+            httpx_client_kwargs (dict, Optional): Additional ``AsyncOpenAI`` constructor options.
+                For example, ``{"timeout": 180}`` sets a three-minute timeout. Custom ``http_client``
+                instances use HTTPX on SDK 2, or HTTPX2 / legacy HTTPX on SDK 3.
+
+        Raises:
+            PyritException: If a generation parameter is out of bounds or a penalty is non-finite.
         """
         super().__init__(custom_configuration=custom_configuration, **kwargs)
+
+        # Validate generation parameters.
+        validate_temperature(temperature)
+        validate_top_p(top_p)
+        validate_presence_penalty(presence_penalty)
+        validate_frequency_penalty(frequency_penalty)
 
         self._max_tokens = max_tokens
         self._temperature = temperature
@@ -112,8 +132,8 @@ class OpenAICompletionTarget(OpenAITarget):
             "api.openai.com": "https://api.openai.com/v1",
         }
 
-    @limit_requests_per_minute
     @pyrit_target_retry
+    @limit_requests_per_minute
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Asynchronously send a message to the OpenAI completion target.
@@ -169,4 +189,6 @@ class OpenAICompletionTarget(OpenAITarget):
         # Extract response text from validated choices
         extracted_response = [choice.text for choice in response.choices]
 
-        return construct_response_from_request(request=request, response_text_pieces=extracted_response)
+        message = construct_response_from_request(request=request, response_text_pieces=extracted_response)
+        self._capture_response_metadata(response=response, pieces=message.message_pieces)
+        return message

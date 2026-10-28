@@ -1,164 +1,163 @@
 # PyRIT GUI (CoPyRIT)
 
-CoPyRIT is a web-based graphical interface for PyRIT built with React and Fluent UI. It provides an interactive way to run attacks, configure targets and converters, and view results — all from a browser.
+CoPyRIT is the browser interface for PyRIT. Use Chat for manual tests, Scanner
+for automated scenarios, and the results pages to review evidence.
 
 ## Getting Started
 
-There are several ways to run CoPyRIT:
-
-### PyRIT Backend CLI
-
-If you have PyRIT installed, use the `pyrit_backend` command to start the server. The bundled frontend is served automatically.
+With PyRIT installed, start the server:
 
 ```bash
-pyrit_backend
+pyrit_backend --auth-mode local
 ```
 
-Then open `http://localhost:8000` in your browser.
+Open `http://localhost:8000` in your browser.
 
-### Docker
+Local mode disables incoming-request authentication and is restricted to
+loopback access. Administrator actions are disabled by default. For a trusted
+local development server, set `PYRIT_ALLOW_UNAUTHENTICATED_ADMIN=true` to enable
+them. Never use these settings for a network-accessible deployment.
 
-CoPyRIT is also available as a Docker container. See the [Docker setup](https://github.com/microsoft/PyRIT/blob/main/docker/) for details.
+For other setup options, see [Docker](../getting_started/install_docker.md) or the
+[Azure deployment guide](https://github.com/microsoft/PyRIT/blob/main/infra/README.md).
 
-### Azure Deployment
+## Home
 
-CoPyRIT can be deployed to Azure Container Apps with Entra authentication and managed identity. See the [Azure deployment guide](https://github.com/microsoft/PyRIT/blob/main/infra/README.md) for the full setup.
+Home shows your default objective target and recent attacks grouped by operation.
+Open an attack to return to its conversation, or go to Registry to configure a
+target. The shared labels bar sets the operator, operation, and custom labels
+for new work; it does not change saved results.
 
-To deploy an isolated instance for an external team, see [Deploy a New Instance](../../infra/DEPLOY_NEW_INSTANCE.md).
+![Home page with default target and recent work](images/home.png)
 
----
+## Chat
 
-## Views
+Chat (`/chat`) is the manual conversation workspace. Select a target and write
+the messages yourself. You can attach media, transform content with converters,
+and branch or edit conversations to try another approach. Add an objective and
+select a chat scorer if you want automated assessment of responses.
 
-CoPyRIT has three main views, accessible from the left sidebar: **Chat**, **Attack History**, and **Target Configuration**. A dark/light theme toggle is available at the bottom of the sidebar.
+The same conversation viewer opens saved attacks from History. Automated results
+are read-only; **Continue manually** creates a separate manual attack. Export
+a conversation when you need a transcript.
 
-### Chat View
+![Chat workspace with a prompt and target response](images/chat.png)
 
-The Chat view is the primary workspace for running interactive attacks against configured targets.
+## Scanner
 
-<img width="1662" alt="Text-to-text chat" src="images/chat_text.png" />
+Scanner (`/scanner`) is the catalog and launch point for automated scenarios.
+Each scenario defines a test workflow with its techniques, data, and scoring.
+Open one to select a target and adjust the settings it supports, such as
+techniques, dataset selection, and concurrency.
 
-#### Sending Messages
+Review the run estimate, then launch the scan. Its run page shows progress,
+errors, and results, with links to individual attacks. See the
+[scanner guide](../scanner/0_scanner.md) for the scenario model.
 
-Type a message and press Enter (or click Send) to send it to the active target. The response appears below. Shift+Enter inserts a newline without sending.
+![Scanner page with available scenarios](images/scanner.png)
 
-#### Attachments
+### technique.execute
 
-Click the attachment button to add images, audio, video, or documents to your message. Supported types include `image/*`, `audio/*`, `video/*`, `.pdf`, `.doc`, `.docx`, and `.txt`. Attachments are displayed as chips below the input with type icons and file sizes.
+Select **technique.execute** in Scanner to run one attack technique against
+one free-text objective. This is not Chat: the selected technique controls
+the attack, rather than you writing each turn. You can adjust its configuration
+for this run and add a baseline comparison.
 
-#### Multi-Modal Responses
+For techniques that support conversation history, start with a stored or edited
+conversation. **Use in scan** in Chat copies a conversation into this setup
+page; it does not start the scan.
 
-CoPyRIT renders different response types inline:
+![technique.execute scenario and technique selection](images/technique_execute.png)
 
-- **Text:** Displayed as plain text
-- **Images:** Rendered inline with the response
-- **Audio:** Playable audio player
-- **Video:** Embedded video player
+![technique.execute objective and per-run technique settings](images/technique_execute_objective.png)
 
-<img width="1662" alt="Text-to-image response" src="images/chat_image.png" />
+## Registry
 
-#### Branching Conversations
+Registry prepares reusable components; it does not execute attacks. Create
+targets to connect to model endpoints, converters to transform content, and
+named techniques that configure existing attacks. Browse configured scorers
+and select a default chat scorer; scorer setup uses initializers, not an editor
+on this page. Target defaults apply to new chats and scans.
 
-Each assistant message has four action buttons:
+**Scenario presets** save a scenario configuration for reuse with a target
+chosen at launch. **Suites** maintain ordered collections of preset definitions.
+They are stored separately from live component instances.
 
-1. **Copy to input:** Copies the message content and attachments into the current input box.
-2. **Copy to new conversation:** Creates a new conversation within the same attack and copies the message to its input.
-3. **Branch conversation:** Clones the conversation up to the selected message into a new conversation within the same attack.
-4. **Branch into new attack:** Creates an entirely new attack with the conversation cloned up to the selected message.
+Targets, converters, and techniques added only to the live registry must be
+recreated after a backend restart or reinitialization. Use
+[initializers](../code/setup/0_setup.md) for repeatable component setup.
 
-<img width="1663" alt="Branching into a new conversation" src="images/chat_branch.png" />
+![Registry page with registered targets and component tabs](images/registry.png)
 
-#### Conversations Panel
+## Datasets
 
-Click the panel toggle in the ribbon to open the conversations sidebar. This panel shows all conversations within the current attack, including message counts and last-message previews. You can switch between conversations, create new ones, and promote a conversation to be the "main" conversation.
+Browse datasets already loaded into backend memory. Open a dataset to inspect
+its examples, search text, or filter by seed type. Supported media can be
+previewed on request.
 
-#### Labels
+Load data through PyRIT before refreshing this catalog. See
+[datasets](../code/datasets/0_dataset.md) for loading options.
 
-The labels bar in the ribbon displays the current attack's labels (e.g., `operator`, `operation`). Labels are key-value pairs that help organize and filter attacks. You can add, edit, and remove labels inline. The `operator` and `operation` labels are required and cannot be removed.
+![Datasets page with stored dataset summaries](images/datasets.png)
 
-#### Behavioral Guards
+## History
 
-CoPyRIT enforces several safety guards:
+Find saved attacks and scanner runs. Filter the list, open results, and inspect
+the conversations and scores. Supported failed scanner runs can be resumed.
 
-- **No target selected:** When no target is configured, the input area shows a banner prompting you to configure a target.
-- **Single-turn targets:** Some targets (e.g., image generators) don't track conversation history. CoPyRIT shows a warning indicator and blocks additional messages after the first turn, offering a "New Conversation" button instead.
-- **Operator locking:** If you open a historical attack created by a different operator, the conversation is read-only. You can use "Continue with your target" to branch into a new attack with your own target.
-- **Cross-target locking:** If the active target differs from the target used in a historical attack, sending is blocked. Use "Continue with your target" to branch with your current target.
+The **Attacks** tab opens individual conversations. The **Scanner** tab opens
+run-level progress and results, including runs from `technique.execute`.
+Resume retries unfinished objectives or objectives with execution errors when
+the original launch configuration is available. It skips completed objectives
+with non-error outcomes, including `failure`. Retrying an unsuccessful technique
+is a separate setting in `technique.execute`.
 
-### Attack History
+Compound-attack hierarchy browsing is a separate GUI follow-up. The
+[backend hierarchy API](../../pyrit/backend/README.md#scenario-result-hierarchy)
+provides paged roots and ordered child expansion without clipping run statistics.
+Conversation reads expose main and pruned conversations only; adversarial and
+preparation contexts remain internal. Transcript bodies load only for a selected
+saved conversation.
 
-The History view lists all past attacks with filtering and pagination.
+![History page with saved attacks](images/attack_history.png)
 
-<img width="1664" alt="Attack history view" src="images/history.png" />
+## Analytics
 
-#### Filters
+Analytics summarizes saved attack results across runs. Filter by operation,
+target, outcome, or other metadata, then compare outcome counts and attack
+success rates with bars or a heatmap. Select a chart group to narrow the report,
+or open a matching attack to inspect its evidence.
 
-Filter attacks by:
+This is a cross-result report, not the progress dashboard for one scanner run.
 
-- **Attack type:** The class of attack used (e.g., `PromptSendingAttack`)
-- **Outcome:** Success, failure, or undetermined
-- **Converter:** Which converters were applied
-- **Operator:** Who ran the attack
-- **Operation:** The operation label
-- **Custom labels:** Free-form key:value label filtering with auto-complete
+![Analytics page with outcome charts and result filters](images/analytics.png)
 
-Click "Reset" to clear all filters.
+## Operations
 
-#### Attack Table
+Operations organize human findings for an engagement. Create an operation,
+record findings with severity and description, and attach saved attacks as
+evidence. A model score does not create a finding automatically.
 
-The table displays:
+Select an operation in the labels bar to associate new chats and scans with it.
+The operation page brings its findings, linked evidence, and execution history
+together.
 
-| Column | Description |
-|--------|-------------|
-| Status | Outcome badge (success/failure/undetermined) |
-| Attack Type | The attack class name |
-| Target | Target type and model name |
-| Operator | Who ran the attack |
-| Operation | Operation label |
-| Msgs | Total message count |
-| Convs | Number of conversations |
-| Converters | Converter badges (truncated with tooltip) |
-| Labels | Additional label badges |
-| Created / Updated | Timestamps |
-| Last Message | Preview of the most recent message |
+![Operations page with a test operation](images/operations.png)
 
-Click any row to open the attack in the Chat view.
+## Configuration
 
-#### Pagination
+Configuration is for backend administration, not per-chat settings. Administrators
+edit the PyRIT configuration and environment sources, inspect the initializer
+sequence, and manage trusted custom initializer scripts.
 
-Results are paginated (25 per page) with "First" and "Next" navigation buttons.
+Saving a change does not apply it to the running backend. Reinitialize PyRIT,
+when supported, or restart the backend to apply saved setup changes. This affects
+all users. See [setup](../code/setup/0_setup.md#reinitializing-a-running-backend)
+for requirements and limits.
 
-### Target Configuration
+![Configuration page with backend setup controls](images/configuration.png)
 
-The Configuration view manages the targets available for attacks.
+## Preferences
 
-<img width="1636" alt="Target configuration" src="images/config.png" />
-
-#### Target Table
-
-Lists all registered targets with their type, endpoint, and model name. Click "Set Active" to select a target for use in the Chat view. The active target is highlighted with an "Active" badge.
-
-#### Creating Targets
-
-Click "New Target" to open the creation dialog. Fill in:
-
-- **Target Type** (required): Select from `OpenAIChatTarget`, `OpenAICompletionTarget`, `OpenAIImageTarget`, `OpenAIVideoTarget`, `OpenAITTSTarget`, `OpenAIResponseTarget`, or `AzureMLChatTarget`
-- **Endpoint URL** (required): Your Azure OpenAI, OpenAI API, or Azure ML endpoint
-- **Model / Deployment Name** (optional): e.g., `gpt-4o`, `dall-e-3`, `Llama-3.2-3B-Instruct`
-- **API Key** (optional): Stored in memory only (not persisted to disk)
-
-For `AzureMLChatTarget`, additional fields are available: **Max New Tokens**, **Temperature**, **Top P**, and **Repetition Penalty**.
-
-#### Auto-Populating Targets
-
-Targets can also be auto-populated by adding an initializer (e.g., `airt`) to your `~/.pyrit/.pyrit_conf` file. This reads endpoints from your `.env` and `.env.local` files. See [.pyrit_conf_example](https://github.com/microsoft/PyRIT/blob/main/.pyrit_conf_example) for details.
-
----
-
-## Connection Health
-
-CoPyRIT monitors the backend connection and shows a status banner:
-
-- **Disconnected (red):** Unable to reach the backend. Check that the server is running.
-- **Degraded (yellow):** Connection is unstable.
-- **Reconnected (green):** Briefly shown after a successful reconnection, then auto-dismissed.
+Use the sidebar's **Theme** menu to change the appearance. User preferences,
+such as default targets, are saved in this browser for the current account.

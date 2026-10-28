@@ -37,14 +37,13 @@ from pyrit.setup.initializers import ScorerInitializer, TargetInitializer
 await initialize_pyrit_async(memory_db_type="InMemory", initializers=[TargetInitializer(), ScorerInitializer()])
 ```
 
-This gives you an in-memory database and default converter/scorer config — enough to run most notebooks and examples. Replace the endpoint/key/model for your provider (Azure, Ollama, Groq, HuggingFace, etc.).
+This gives you an in-memory database with configured targets and scorers registered for selection by name or tag. Replace the endpoint/key/model for your provider (Azure, Ollama, Groq, HuggingFace, etc.).
 
 ## For Persistent Setup
 
 For anything beyond a quick test — especially `pyrit_scan`, scenarios, and repeated use — you'll want to save your configuration to files in `~/.pyrit/`:
 
 :::::{grid} 1 1 2 2
-:gutter: 3
 
 ::::{card} 🔑 Populating Secrets
 :link: ./populating_secrets

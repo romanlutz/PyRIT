@@ -12,21 +12,27 @@
 # # Adaptive Scenarios
 #
 # An **adaptive scenario** doesn't run every attack technique against every objective.
-# Instead, it picks which technique to try next per-objective, learns from what worked,
-# and stops as soon as one technique succeeds. This concentrates spend on techniques
-# that actually work on your target.
+# Instead, it selects an ordered list of techniques for each objective using
+# historical results, then stops execution as soon as one technique succeeds.
 #
 # ## How it works (high level)
 #
-# For each objective, the scenario tries up to `max_attempts_per_objective` techniques:
+# During initialization, the selector chooses up to
+# `max_attempts_per_objective` techniques for each objective:
 #
 # - With probability `epsilon`, it **explores** — picks a random technique.
 # - Otherwise it **exploits** — picks the technique with the highest observed success
 #   rate so far.
-# - It records the outcome and stops early on success.
+# - The ordered choices are saved in the run plan.
 #
-# Unseen techniques are tried first, so the first few objectives effectively round-robin
-# through every technique before the scenario settles on the best performers.
+# The selector is stateless and reads results from memory in its configured scope
+# (all runs by default). Unseen techniques receive an optimistic estimate; ties
+# are resolved randomly, not by guaranteed round-robin selection.
+#
+# All choices are made before this run starts executing. Results from an earlier
+# objective in this prebuilt run do not change a later objective's choices.
+# `SequentialAttack` tries each saved list in order and stops on success.
+# Resume restores the saved choices without calling the selector again.
 #
 # ## Adaptive vs. static scenarios
 #
@@ -48,7 +54,7 @@ from pathlib import Path
 
 from pyrit.output.scenario_result.pretty import PrettyScenarioResultMemoryPrinter
 from pyrit.registry import TargetRegistry
-from pyrit.scenario import DatasetAttackConfiguration
+from pyrit.scenario import DatasetAttackConfiguration, DatasetSource
 from pyrit.scenario.scenarios.adaptive import TextAdaptive
 from pyrit.setup import initialize_from_config_async
 
@@ -70,6 +76,25 @@ scenario.set_params_from_args(args={"objective_target": objective_target})  # ty
 await scenario.initialize_async()  # type: ignore
 result = await scenario.run_async()  # type: ignore
 await printer.write_async(result)  # type: ignore
+
+# %% [markdown]
+# ## ImageTechniqueAdaptive
+#
+# `ImageTechniqueAdaptive` is the image subclass of `AdaptiveScenario`. It renders each text
+# objective into an image (blank canvas, QR code, grid composite, comic panel, ...) and sends it to a
+# vision-capable target, then scores the text response. Because the objective target must accept
+# **both text and image input** and return text, the direct-text baseline stays a valid comparison —
+# use a multimodal target such as `openai_chat` (e.g. gpt-4o).
+
+# %%
+from pyrit.scenario.scenarios.adaptive import ImageTechniqueAdaptive
+
+image_scenario = ImageTechniqueAdaptive()
+
+image_scenario.set_params_from_args(args={"objective_target": objective_target})  # type: ignore
+await image_scenario.initialize_async()  # type: ignore
+image_result = await image_scenario.run_async()  # type: ignore
+await printer.write_async(image_result)  # type: ignore
 
 # %% [markdown]
 # ## Configuring a run
@@ -102,8 +127,8 @@ configured_scenario.set_params_from_args(  # type: ignore
         "objective_target": objective_target,
         "scenario_techniques": [technique_class("single_turn")],
         "dataset_config": DatasetAttackConfiguration(
-            dataset_names=["airt_hate", "airt_violence"],
-            max_dataset_size=4,
+            sources=[DatasetSource(name="airt_hate"), DatasetSource(name="airt_violence")],
+            max_total=4,
         ),
     }
 )
@@ -114,9 +139,10 @@ await printer.write_async(configured_result)  # type: ignore
 # %% [markdown]
 # ## Resuming a run
 #
-# Adaptive scenarios are resumable — pass `scenario_result_id=...` to the `TextAdaptive`
-# constructor and the run picks up where it left off. Resume must use the same
-# configuration as the original run.
+# Pass `scenario_result_id` to resume with the original run configuration.
+# The saved technique order is restored; the selector is not called again.
+# Resume fails if a saved technique or seed group cannot be restored.
+# Older runs without saved choices must start a new run.
 
 # %%
 resumed_scenario = TextAdaptive(
@@ -132,8 +158,8 @@ resumed_scenario.set_params_from_args(  # type: ignore
         "objective_target": objective_target,
         "scenario_techniques": [technique_class("single_turn")],
         "dataset_config": DatasetAttackConfiguration(
-            dataset_names=["airt_hate", "airt_violence"],
-            max_dataset_size=4,
+            sources=[DatasetSource(name="airt_hate"), DatasetSource(name="airt_violence")],
+            max_total=4,
         ),
     }
 )
@@ -157,6 +183,11 @@ await printer.write_async(resumed_result)  # type: ignore
 # human-readable label, and `unique_name` (e.g. `"CrescendoAttack::a1b2c3d4"`)
 # when you need to distinguish two factories that wrap the same attack class
 # with different configurations.
+#
+# Each child also records the name its technique was registered under (e.g.
+# `"crescendo"`) as `child.technique_name`, which scenario result printers and
+# `pyrit_scan scenario-results` show as the technique label. It is `None` for
+# results saved before the name was recorded.
 #
 # Use `result.get_display_groups()` to aggregate `attack_results` by the
 # per-dataset display label set by the scenario.
@@ -233,6 +264,58 @@ for technique, n in total_picks.most_common():
     print(f"{technique:40s}  {total_wins[technique]:>4} / {n:<4}   {total_wins[technique] / n:.0%}")
 
 # %% [markdown]
+# ## Result roles in scenario progress
+#
+# The strategy that produces each result records what the result represents, and the scenario progress
+# API (`GET /api/scenarios/runs/{scenario_result_id}/progress`) returns it. Clients read these fields
+# instead of inferring a parent from a class name or an empty conversation ID:
+#
+# - `result_role` is `target_facing` for an attack that sends its own requests to the objective target,
+#   `orchestration` for a parent that only runs other attacks (such as the per-objective
+#   `SequentialAttack`), and `unknown` for rows saved before roles were recorded. A `target_facing` role
+#   does not prove a request reached the target: an attack that ends in a preparation failure is still
+#   `target_facing`.
+# - `child_attack_result_ids` lists an orchestration parent's children in the order they ran.
+# - `attempt_index` is a child's 1-based position under its immediate parent. For a technique that
+#   Adaptive runs directly, it matches the `_adaptive_attempt` memory label. When that technique is
+#   itself a compound attack such as a nested `SequentialAttack`, its children are numbered under the
+#   nested parent instead, so their `attempt_index` is not the Adaptive attempt number. Their
+#   `_adaptive_attempt` label still names the outer attempt, but the progress response does not
+#   include it.
+# - Each `summary.atomic_groups` entry has a `kind`: `attack`, `baseline`, `adaptive`, or `unknown` for
+#   plans saved before kinds were recorded.
+#
+# Roles describe results without changing how progress is counted: a parent and its children still
+# belong to one planned unit.
+#
+# SDK consumers can use `AttackResultMetadata.from_metadata(metadata=result.attribution_data)` from
+# `pyrit.models` to read the same role and parent-relative index as the progress API. Execution writes
+# these fields with `AttackResultMetadata.to_metadata()`, keeping their storage and legacy handling shared.
+#
+# This excerpt of a progress response shows one Adaptive objective whose first attempt failed and whose
+# second succeeded (other fields omitted):
+#
+# ```json
+# {
+#   "results": [
+#     {"attack_result_id": "child-1", "conversation_id": "conversation-1", "outcome": "failure",
+#      "result_role": "target_facing", "child_attack_result_ids": [], "attempt_index": 1},
+#     {"attack_result_id": "child-2", "conversation_id": "conversation-2", "outcome": "success",
+#      "result_role": "target_facing", "child_attack_result_ids": [], "attempt_index": 2},
+#     {"attack_result_id": "parent", "conversation_id": "", "outcome": "success",
+#      "result_role": "orchestration", "child_attack_result_ids": ["child-1", "child-2"],
+#      "attempt_index": null}
+#   ],
+#   "summary": {
+#     "atomic_groups": [
+#       {"atomic_attack_name": "baseline", "kind": "baseline", "completed": 1, "planned": 1},
+#       {"atomic_attack_name": "adaptive_airt_hate::4f0c...", "kind": "adaptive", "completed": 1, "planned": 1}
+#     ]
+#   }
+# }
+# ```
+
+# %% [markdown]
 # ## Running from the scanner CLI
 #
 # You can run `TextAdaptive` directly from the `pyrit_scan` CLI without writing Python:
@@ -249,5 +332,5 @@ for technique, n in total_picks.most_common():
 # # Use specific datasets and limit size
 # pyrit_scan --scenario TextAdaptive --target openai_chat \
 #     --datasets airt_hate airt_violence \
-#     --max-dataset-size 10
+#     --max-total 10
 # ```

@@ -10,15 +10,20 @@ Extends SeedGroup to enforce exactly one objective is present.
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from pyrit.models.identifiers import SeedIdentifier, compute_seed_group_hash
+from pyrit.models.seeds.adversarial_prompts import AdversarialPrompts
 from pyrit.models.seeds.seed_group import SeedGroup
 from pyrit.models.seeds.seed_objective import SeedObjective
+from pyrit.models.seeds.seed_prompt import SeedPrompt
+from pyrit.models.seeds.seed_simulated_conversation import SeedSimulatedConversation
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from pyrit.models.seeds.attack_technique_seed_group import AttackTechniqueSeedGroup
+    from pyrit.models.seeds.seed import Seed
 
 
 class AttackSeedGroup(SeedGroup):
@@ -32,6 +37,8 @@ class AttackSeedGroup(SeedGroup):
     next_message, etc.) is inherited from SeedGroup.
     """
 
+    adversarial_prompts: AdversarialPrompts | None = None
+
     def _check_invariants(self) -> None:
         """
         Validate the seed attack group state.
@@ -44,6 +51,25 @@ class AttackSeedGroup(SeedGroup):
         """
         super()._check_invariants()
         self._enforce_exactly_one_objective()
+        self._bind_adversarial_prompts()
+
+    def _bind_adversarial_prompts(self) -> None:
+        """
+        Anchor group-level prompts on the objective for flat seed storage.
+
+        Raises:
+            ValueError: If the explicit prompts conflict with the stored association.
+        """
+        saved = AdversarialPrompts.from_metadata(self.objective.metadata)
+        if self.adversarial_prompts is None:
+            self.adversarial_prompts = saved
+        elif saved is not None and saved.identity != self.adversarial_prompts.identity:
+            raise ValueError("Group adversarial prompts conflict with the objective's saved association.")
+        if self.adversarial_prompts is not None:
+            self.objective.metadata = {
+                **(self.objective.metadata or {}),
+                **self.adversarial_prompts.to_metadata(),
+            }
 
     def _enforce_exactly_one_objective(self) -> None:
         """
@@ -82,6 +108,17 @@ class AttackSeedGroup(SeedGroup):
         if obj is None:
             raise ValueError("AttackSeedGroup should always have an objective")
         return obj
+
+    @property
+    def logical_id(self) -> str:
+        """
+        The deterministic identity of this original logical seed group.
+
+        The ordered seed identifiers contain behavioral seed values but omit
+        random ``prompt_group_id`` values. Call this before technique seeds are
+        merged so the same ID is recoverable from an enriched attack result.
+        """
+        return compute_seed_group_hash([SeedIdentifier.from_seed(seed) for seed in self.seeds])
 
     def is_compatible_with_technique(self, *, technique: AttackTechniqueSeedGroup) -> bool:
         """
@@ -142,6 +179,8 @@ class AttackSeedGroup(SeedGroup):
         Raises:
             ValueError: If the technique contains a SeedSimulatedConversation whose
                 sequence range overlaps with existing prompt sequences.
+            ValueError: If preserving prompt placement combines conflicting roles at
+                the same sequence.
         """
         # Pre-merge compatibility check with a clear error message
         if not self.is_compatible_with_technique(technique=technique):
@@ -155,18 +194,12 @@ class AttackSeedGroup(SeedGroup):
                 f"overlapping the simulated conversation range are incompatible."
             )
 
-        base = list(self.seeds)
+        base_seeds = [copy.deepcopy(seed) for seed in self.seeds]
+        technique_seeds = [copy.deepcopy(seed) for seed in technique.seeds]
         idx = technique.insertion_index
-        technique_seeds = list(technique.seeds)
-        merged_seeds = base + technique_seeds if idx is None else base[:idx] + technique_seeds + base[idx:]
-
-        # ``self`` and ``technique`` may be shared across multiple ``with_technique``
-        # calls (e.g. the dispatcher reuses one ``bundle.seed_technique`` instance
-        # across every objective). Deepcopy first so the per-seed mutation below
-        # and the fresh group_id assigned by ``AttackSeedGroup.__init__`` only
-        # touch the returned group, leaving the originals untouched as the
-        # docstring promises.
-        merged_seeds = [copy.deepcopy(seed) for seed in merged_seeds]
+        merged_seeds = (
+            base_seeds + technique_seeds if idx is None else base_seeds[:idx] + technique_seeds + base_seeds[idx:]
+        )
 
         # Clear group IDs so the new group assigns a fresh one.
         # ``_enforce_consistent_group_id`` in the constructor will overwrite
@@ -174,4 +207,33 @@ class AttackSeedGroup(SeedGroup):
         for seed in merged_seeds:
             seed.prompt_group_id = None
 
+        self._normalize_prompt_sequences(
+            base_seeds=base_seeds,
+            technique_seeds=technique_seeds,
+            prepend_technique=technique.prompt_placement == "prepend",
+        )
+
         return AttackSeedGroup(seeds=merged_seeds)
+
+    @staticmethod
+    def _normalize_prompt_sequences(
+        *,
+        base_seeds: Sequence[Seed[Any]],
+        technique_seeds: Sequence[Seed[Any]],
+        prepend_technique: bool,
+    ) -> None:
+        """Normalize merged prompt sequences while preserving source-relative order."""
+        all_seeds = [*base_seeds, *technique_seeds]
+        # Simulated conversations reserve an absolute sequence range; renumbering only prompts
+        # could invalidate that range or create an overlap.
+        if any(isinstance(seed, SeedSimulatedConversation) for seed in all_seeds):
+            return
+
+        seed_groups = (technique_seeds, base_seeds) if prepend_technique else (all_seeds,)
+        next_sequence = 0
+        for seeds in seed_groups:
+            prompts = [seed for seed in seeds if isinstance(seed, SeedPrompt)]
+            rank_by_sequence = {value: rank for rank, value in enumerate(sorted({p.sequence for p in prompts}))}
+            for prompt in prompts:
+                prompt.sequence = next_sequence + rank_by_sequence[prompt.sequence]
+            next_sequence += len(rank_by_sequence)

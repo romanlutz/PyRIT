@@ -13,11 +13,12 @@ to test.
 from __future__ import annotations
 
 import logging
-from functools import cache
 from typing import TYPE_CHECKING
 
 from pyrit.common import apply_defaults
-from pyrit.scenario.core.dataset_configuration import CompoundDatasetAttackConfiguration
+from pyrit.common.async_compatibility import run_legacy_sync_async
+from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
+from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration, DatasetSource
 from pyrit.scenario.core.matrix_atomic_attack_builder import build_matrix_atomic_attacks
 from pyrit.scenario.core.scenario import Scenario
 
@@ -30,32 +31,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@cache
+@AttackTechniqueRegistry.cache_scenario_technique_class
 def _build_rapid_response_technique() -> type[ScenarioTechnique]:
     """
     Build the RapidResponse technique class dynamically from the registered factories.
 
-    Reads the singleton ``AttackTechniqueRegistry`` and filters to factories
-    tagged ``core``.
+    Reads every technique registered in the singleton ``AttackTechniqueRegistry``
+    and exposes all of them. Which techniques are available is decided by the
+    active initializer (the registration gate), not narrowed again here.
 
     Returns:
         type[ScenarioTechnique]: The dynamically generated technique enum class.
     """
-    from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
-    from pyrit.registry.tag_query import TagQuery
-
     registry = AttackTechniqueRegistry.get_registry_singleton()
     factories = list(registry.get_factories_or_raise().values())
 
-    return AttackTechniqueRegistry.build_technique_class_from_factories(  # type: ignore[ty:invalid-return-type]
+    return AttackTechniqueRegistry.build_technique_class_from_factories(
         class_name="RapidResponseTechnique",
         factories=factories,
-        available=TagQuery.all("core"),
-        aggregate_tags={
-            "single_turn": TagQuery.any_of("single_turn"),
-            "multi_turn": TagQuery.any_of("multi_turn"),
-        },
-        default_technique_names={"role_play_movie_script", "many_shot"},
+        default_tags={"light"},
     )
 
 
@@ -67,7 +61,10 @@ class RapidResponse(Scenario):
     techniques.
     """
 
-    VERSION: int = 2
+    #: Bumped from 2 → 3 by dropping the ``core`` pool gate so the selectable
+    #: technique pool (and the ``all`` aggregate) reflects whatever the initializer
+    #: registered. ``use_cached`` only matches prior runs at the current ``VERSION``.
+    VERSION: int = 3
 
     @apply_defaults
     def __init__(
@@ -96,18 +93,20 @@ class RapidResponse(Scenario):
             version=self.VERSION,
             objective_scorer=self._objective_scorer,
             technique_class=technique_class,
-            default_technique=technique_class("default"),
-            default_dataset_config=CompoundDatasetAttackConfiguration.per_dataset(
-                dataset_names=[
-                    "airt_hate",
-                    "airt_fairness",
-                    "airt_violence",
-                    "airt_sexual",
-                    "airt_harassment",
-                    "airt_misinformation",
-                    "airt_leakage",
+            default_dataset_config=DatasetAttackConfiguration(
+                sources=[
+                    DatasetSource(name=name)
+                    for name in [
+                        "airt_hate",
+                        "airt_fairness",
+                        "airt_violence",
+                        "airt_sexual",
+                        "airt_harassment",
+                        "airt_misinformation",
+                        "airt_leakage",
+                    ]
                 ],
-                max_dataset_size=4,
+                max_per_dataset=4,
             ),
             scenario_result_id=scenario_result_id,
         )
@@ -117,8 +116,9 @@ class RapidResponse(Scenario):
         Build the technique × harm-category atomic attacks, grouped by harm category.
 
         Results group by harm category (the dataset name) rather than technique so per-category
-        ASR rolls up naturally. The baseline is emitted centrally by the base
-        ``initialize_async``, so this override never prepends one.
+        ASR rolls up naturally. The baseline is emitted by ``build_matrix_atomic_attacks`` when
+        ``context.include_baseline`` is set (the base no longer emits one centrally), so this
+        override never prepends one itself.
 
         Args:
             context (ScenarioContext): The resolved runtime inputs for this run.
@@ -126,9 +126,9 @@ class RapidResponse(Scenario):
         Returns:
             list[AtomicAttack]: The generated atomic attacks.
         """
-        return build_matrix_atomic_attacks(
+        return await run_legacy_sync_async(
+            build_matrix_atomic_attacks,
             context=context,
             objective_scorer=self._objective_scorer,
             display_group_fn=lambda combo: combo.dataset_name,
-            technique_converters=self._technique_converters,
         )

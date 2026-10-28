@@ -1,23 +1,83 @@
 import { makeStyles, tokens } from '@fluentui/react-components'
+import { mobileTouchTarget, NARROW_VIEWPORT_QUERY } from '../../styles/touchTargets'
+
+import { WORKSPACE_CANVAS_BACKGROUND } from '@/styles/workspaceBackground'
+
+export const CHAT_NOTICE_FADE_DURATION_MS = 200
 
 export const useChatWindowStyles = makeStyles({
+  infoNotice: {
+    opacity: 1,
+    transitionProperty: 'opacity',
+    transitionDuration: `${CHAT_NOTICE_FADE_DURATION_MS}ms`,
+    transitionTimingFunction: 'ease-out',
+    '@media (prefers-reduced-motion: reduce)': {
+      transitionDuration: '0ms',
+    },
+  },
+  fadingInfoNotice: {
+    opacity: 0,
+  },
   root: {
     display: 'flex',
     height: '100%',
     width: '100%',
     overflow: 'hidden',
   },
+  pageHeading: {
+    position: 'absolute',
+    width: '1px',
+    height: '1px',
+    padding: 0,
+    margin: '-1px',
+    overflow: 'hidden',
+    clip: 'rect(0, 0, 0, 0)',
+    whiteSpace: 'nowrap',
+    border: 0,
+  },
   chatArea: {
     display: 'flex',
     flexDirection: 'column',
     flex: 1,
     minWidth: 0,
-    backgroundColor: tokens.colorNeutralBackground2,
+    backgroundColor: WORKSPACE_CANVAS_BACKGROUND,
     overflow: 'hidden',
   },
+  breadcrumbBar: {
+    display: 'flex',
+    alignItems: 'center',
+    flexShrink: 0,
+    minHeight: '36px',
+    paddingInline: tokens.spacingHorizontalL,
+    borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+    backgroundColor: tokens.colorNeutralBackground3,
+    overflowX: 'auto',
+  },
+  breadcrumbLink: {
+    color: tokens.colorBrandForegroundLink,
+    textDecorationLine: 'none',
+    whiteSpace: 'nowrap',
+    ':hover': {
+      textDecorationLine: 'underline',
+    },
+    ':focus-visible': {
+      outline: `2px solid ${tokens.colorStrokeFocus2}`,
+      outlineOffset: '2px',
+    },
+  },
+  conversationDrawer: {
+    width: '280px',
+    minWidth: '280px',
+    height: '100%',
+  },
+  narrowConversationDrawer: {
+    width: '320px',
+    minWidth: 0,
+    maxWidth: '100vw',
+  },
   ribbon: {
-    height: '48px',
     minHeight: '48px',
+    flexWrap: 'wrap',
     flexShrink: 0,
     backgroundColor: tokens.colorNeutralBackground3,
     borderBottom: `1px solid ${tokens.colorNeutralStroke1}`,
@@ -33,9 +93,52 @@ export const useChatWindowStyles = makeStyles({
     gap: tokens.spacingHorizontalS,
     color: tokens.colorNeutralForeground2,
     fontSize: tokens.fontSizeBase300,
-    flex: '1 1 auto',
+    flex: '0 1 auto',
     minWidth: 0,
     overflow: 'hidden',
+  },
+  sharedToolbar: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexGrow: 1,
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalM,
+    minWidth: 0,
+    maxWidth: '100%',
+  },
+  conversationControls: {
+    display: 'flex',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalM,
+    marginRight: 'auto',
+    minWidth: 0,
+    maxWidth: '100%',
+  },
+  editActions: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalXS,
+  },
+  temperatureField: {
+    gridTemplateColumns: 'max-content 5rem',
+    columnGap: tokens.spacingHorizontalNone,
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  temperatureInput: {
+    width: '5rem',
+    minWidth: 0,
+  },
+  sharedTarget: {
+    maxWidth: '240px',
+    [NARROW_VIEWPORT_QUERY]: {
+      flexBasis: '100%',
+      maxWidth: '100%',
+      justifyContent: 'flex-start',
+    },
   },
   noTarget: {
     color: tokens.colorNeutralForeground3,
@@ -48,8 +151,22 @@ export const useChatWindowStyles = makeStyles({
     gap: tokens.spacingHorizontalS,
     flexShrink: 0,
   },
+  sharedActions: {
+    flexShrink: 1,
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
+    minWidth: 0,
+    marginLeft: 'auto',
+  },
+  ribbonAction: {
+    ...mobileTouchTarget,
+  },
   newAttackButton: {
     flexShrink: 0,
+    [NARROW_VIEWPORT_QUERY]: {
+      minWidth: '32px',
+    },
+    ...mobileTouchTarget,
   },
   newAttackLabel: {
     '@media (max-width: 600px)': {

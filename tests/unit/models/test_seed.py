@@ -5,14 +5,18 @@ import os
 import pathlib
 import tempfile
 import uuid
+from typing import assert_type
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+import yaml
+from jinja2 import StrictUndefined
+from jinja2.sandbox import SandboxedEnvironment
 from PIL import Image
 from scipy.io import wavfile
 
-from pyrit.common.path import DATASETS_PATH
+from pyrit.common.path import DATASETS_PATH, PATHS_DICT
 from pyrit.memory.storage.serializers import set_seed_sha256_async
 from pyrit.models import (
     AttackSeedGroup,
@@ -74,6 +78,22 @@ def test_seed_prompt_initialization(seed_prompt_fixture):
     assert seed_prompt_fixture.value == "Test prompt"
     assert seed_prompt_fixture.data_type == "text"
     assert seed_prompt_fixture.parameters == ["param1"]
+
+
+def test_from_yaml_file_preserves_seed_subclass(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "seed.yaml"
+    path.write_text("value: Test seed\ndata_type: text\n", encoding="utf-8")
+
+    prompt = SeedPrompt.from_yaml_file(path)
+    objective = SeedObjective.from_yaml_file(path)
+
+    assert_type(prompt, SeedPrompt)
+    assert_type(objective, SeedObjective)
+    assert type(prompt) is SeedPrompt
+    assert type(objective) is SeedObjective
+    assert prompt.value == objective.value == "Test seed"
+    assert prompt.is_jinja_template
+    assert objective.is_jinja_template
 
 
 @pytest.mark.parametrize(
@@ -202,6 +222,426 @@ def test_render_template_value_silent_blocks_ssti_via_endraw_injection():
     result = seed.render_template_value_silent()
     # Must NOT contain any Python class names — that would mean the SSTI executed
     assert "__class__" not in result or result == raw_wrapped
+
+
+@pytest.mark.parametrize(
+    ("template_value", "parameters", "expected"),
+    [
+        ("{% if flag %}A{% else %}B{% endif %}", {"flag": True}, "A"),
+        ("{% if flag %}A{% else %}B{% endif %}", {"flag": False}, "B"),
+        ("{% if flag %}A{% else %}B{% endif %}", {"flag": None}, "B"),
+        ("{% if other %}A{% elif flag %}B{% else %}C{% endif %}", {"other": False, "flag": False}, "C"),
+        ('{{ "A" if flag else "B" }}', {"flag": False}, "B"),
+        ("{% set local = flag %}{% if local %}A{% else %}B{% endif %}", {"flag": False}, "B"),
+        ("{% if flag is defined %}A{% else %}B{% endif %}", {}, "B"),
+        ("{{ flag | default('B') }}", {}, "B"),
+        ("{% if flag == 'a' %}A{% else %}B{% endif %}", {"flag": "b"}, "B"),
+        ("{% if flag != 'a' %}A{% else %}B{% endif %}", {"flag": "b"}, "A"),
+        ("{% if flag is filter %}A{% else %}B{% endif %}", {"flag": "upper"}, "A"),
+        ("{% if flag is test %}A{% else %}B{% endif %}", {"flag": "nope"}, "B"),
+        ("{% for item in ['A', 'B'] if flag %}{{ item }}{% endfor %}", {"flag": False}, ""),
+        (
+            "{% macro show(rows) %}{% for row in rows %}[{{ row }}]{% endfor %}{% endmacro %}{{ show(items) }}",
+            {"items": ["x", "y"]},
+            "[x][y]",
+        ),
+    ],
+)
+def test_seed_prompt_keeps_template_whose_missing_parameter_decides_a_branch(template_value, parameters, expected):
+    template = SeedPrompt(value=template_value, data_type="text", is_jinja_template=True)
+
+    assert template.value == template_value
+    assert template.render_template_value(**parameters) == expected
+
+
+@pytest.mark.parametrize(
+    ("conversation_context", "expected_tail"),
+    [(None, ""), ("two turns", "Context: two turns")],
+)
+def test_seed_prompt_keeps_path_resolved_at_load_when_its_condition_is_deferred(conversation_context, expected_tail):
+    template = SeedPrompt(
+        value="Path: {{ datasets_path }}. {% if conversation_context %}Context: {{ conversation_context }}{% endif %}",
+        data_type="text",
+        is_jinja_template=True,
+    )
+
+    # Memory rebuilds a stored prompt from its value alone, without is_jinja_template
+    reloaded = SeedPrompt(value=template.value, data_type="text")
+
+    for seed in (template, reloaded):
+        rendered = seed.render_template_value(conversation_context=conversation_context)
+        assert rendered == f"Path: {DATASETS_PATH}. {expected_tail}"
+
+
+@pytest.mark.parametrize("seed_class", [SeedPrompt, SeedObjective])
+@pytest.mark.parametrize("conversation_context", [None, "rainbows"])
+@pytest.mark.parametrize(
+    "path_expression",
+    [
+        "{{ datasets_path }}",
+        "{{ datasets_path.name }}",
+        "{{ datasets_path.as_posix() }}",
+        "{{ datasets_path.is_absolute() }}",
+        "{{ datasets_path.parent.name }}",
+        "{{ (datasets_path / 'sample.txt').name }}",
+        "{% for part in datasets_path.parts %}[{{ part }}]{% endfor %}",
+        "{{ datasets_path is string }}",
+    ],
+)
+def test_deferred_template_keeps_path_operations_after_reconstruction(
+    *,
+    seed_class: type[SeedPrompt | SeedObjective],
+    conversation_context: str | None,
+    path_expression: str,
+) -> None:
+    source = f"{path_expression}. {{% if conversation_context %}}{{{{ conversation_context }}}}{{% endif %}}"
+    expected = (
+        SandboxedEnvironment(undefined=StrictUndefined)
+        .from_string(source)
+        .render(**PATHS_DICT, conversation_context=conversation_context)
+    )
+    template = seed_class(value=source, data_type="text", is_jinja_template=True)
+    reloaded = seed_class(value=template.value, data_type="text")
+    revalidated = seed_class.model_validate(template.model_dump())
+
+    assert revalidated.value == template.value
+    for seed in (template, reloaded, revalidated):
+        assert seed.render_template_value(conversation_context=conversation_context) == expected
+        assert seed.render_template_value_silent(conversation_context=conversation_context) == expected
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        pathlib.PureWindowsPath(r"C:\data\quoted 'folder'\templates"),
+        pathlib.PurePosixPath("/data/quoted 'folder'/templates"),
+    ],
+)
+@pytest.mark.parametrize("seed_class", [SeedPrompt, SeedObjective])
+def test_deferred_path_binding_keeps_flavor_and_escaping(
+    *, seed_class: type[SeedPrompt | SeedObjective], path: pathlib.PurePath
+) -> None:
+    source = (
+        "{{ datasets_path.as_posix() }} {{ datasets_path.parent.name }} "
+        "{% if conversation_context %}{{ conversation_context }}{% endif %}"
+    )
+    expected = (
+        SandboxedEnvironment(undefined=StrictUndefined)
+        .from_string(source)
+        .render(datasets_path=path, conversation_context="rainbows")
+    )
+    with (
+        patch("pyrit.models.seeds.seed_prompt.PATHS_DICT", {"datasets_path": path}),
+        patch("pyrit.models.seeds.seed_objective.PATHS_DICT", {"datasets_path": path}),
+    ):
+        template = seed_class(value=source, data_type="text", is_jinja_template=True)
+
+    reloaded = seed_class(value=template.value, data_type="text")
+    assert reloaded.render_template_value(conversation_context="rainbows") == expected
+
+
+@pytest.mark.parametrize("seed_class", [SeedPrompt, SeedObjective])
+def test_untrusted_template_path_filter_does_not_expose_file_access(
+    seed_class: type[SeedPrompt | SeedObjective],
+) -> None:
+    template = seed_class(
+        value="{{ ('sample' | pyrit_path).read_text() }}",
+        data_type="text",
+    )
+
+    with pytest.raises(ValueError, match="has no attribute 'read_text'"):
+        template.render_template_value()
+
+
+@pytest.mark.parametrize("seed_class", [SeedPrompt, SeedObjective])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{% if datasets_path.is_absolute() and flag %}{{ prompt }}{% endif %}",
+        "{% if datasets_path . is_absolute () and flag %}{{ prompt }}{% endif %}",
+        "{{ datasets_path.is_absolute() }} {{ prompt }}{% if flag %}yes{% endif %}",
+        "{% set local = datasets_path %}{{ local.is_absolute() }} {% if flag %}{{ prompt }}{% endif %}",
+        "{% set local = datasets_path.parent %}{{ local.name }} {% if flag %}{{ prompt }}{% endif %}",
+        "{{ datasets_path.name ~ prompt }}{% if flag %}yes{% endif %}",
+        "{%- if flag -%}{{ datasets_path.is_absolute() }} {{ prompt }}{%- endif -%}",
+        (
+            "{% raw %}{{ datasets_path.is_absolute() }}{% endraw %}{{ datasets_path.is_absolute() }}"
+            "{% if flag %}yes{% endif %}"
+        ),
+    ],
+)
+def test_deferred_template_preserves_bound_path_operations_in_expressions(
+    *, seed_class: type[SeedPrompt | SeedObjective], source: str
+) -> None:
+    expected = (
+        SandboxedEnvironment(undefined=StrictUndefined)
+        .from_string(source)
+        .render(**PATHS_DICT, flag=True, prompt="rainbows")
+    )
+    template = seed_class(value=source, data_type="text", is_jinja_template=True)
+    reloaded = seed_class(value=template.value, data_type="text")
+
+    assert reloaded.render_template_value(flag=True, prompt="rainbows") == expected
+
+
+@pytest.mark.parametrize("seed_class", [SeedPrompt, SeedObjective])
+def test_deferred_template_keeps_fully_bound_path_loop(
+    *, seed_class: type[SeedPrompt | SeedObjective], tmp_path: pathlib.Path
+) -> None:
+    source = (
+        "{% for part in datasets_path.parts %}[{{ part }}]{% endfor %}"
+        "{% for parent in datasets_path.parents %}<{{ parent.name }}>{% endfor %}"
+        "{% if flag %}{{ prompt }}{% endif %}"
+    )
+    expected = (
+        SandboxedEnvironment(undefined=StrictUndefined)
+        .from_string(source)
+        .render(datasets_path=tmp_path, flag=True, prompt="rainbows")
+    )
+    with (
+        patch("pyrit.models.seeds.seed_prompt.PATHS_DICT", {"datasets_path": tmp_path}),
+        patch("pyrit.models.seeds.seed_objective.PATHS_DICT", {"datasets_path": tmp_path}),
+    ):
+        template = seed_class(value=source, data_type="text", is_jinja_template=True)
+    reloaded = seed_class(value=template.value, data_type="text")
+
+    assert reloaded.render_template_value(flag=True, prompt="rainbows") == expected
+
+
+@pytest.mark.parametrize("seed_class", [SeedPrompt, SeedObjective])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{{ (datasets_path / 'secret.txt').read_text() }}",
+        "{{ (datasets_path / 'secret.txt').read_bytes() }}",
+        "{{ (datasets_path / 'secret.txt').open().read() }}",
+        "{{ (datasets_path / 'secret.txt').exists() }}",
+        "{% for entry in datasets_path.iterdir() %}{{ entry.name }}{% endfor %}",
+        "{% for entry in datasets_path.glob('*') %}{{ entry.name }}{% endfor %}",
+    ],
+)
+def test_trusted_template_cannot_read_the_filesystem_through_a_supplied_path(
+    *, seed_class: type[SeedPrompt | SeedObjective], source: str, tmp_path: pathlib.Path
+) -> None:
+    (tmp_path / "secret.txt").write_text("TOP-SECRET", encoding="utf-8")
+    with (
+        patch("pyrit.models.seeds.seed_prompt.PATHS_DICT", {"datasets_path": tmp_path}),
+        patch("pyrit.models.seeds.seed_objective.PATHS_DICT", {"datasets_path": tmp_path}),
+    ):
+        template = seed_class(value=source, data_type="text", is_jinja_template=True)
+
+    assert template.value == source
+
+
+@pytest.mark.parametrize("seed_class", [SeedPrompt, SeedObjective])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{{ (datasets_path / 'pwned.txt').write_text('owned') }}",
+        "{{ (datasets_path / 'pwned.txt').write_bytes('owned'.encode()) }}",
+        "{{ (datasets_path / 'pwned.txt').touch() }}",
+        "{{ (datasets_path / 'pwned').mkdir() }}",
+        "{{ (datasets_path / 'secret.txt').rename(datasets_path / 'pwned.txt') }}",
+        "{{ (datasets_path / 'secret.txt').unlink() }}",
+    ],
+)
+def test_trusted_template_cannot_modify_the_filesystem_through_a_supplied_path(
+    *, seed_class: type[SeedPrompt | SeedObjective], source: str, tmp_path: pathlib.Path
+) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP-SECRET", encoding="utf-8")
+    with (
+        patch("pyrit.models.seeds.seed_prompt.PATHS_DICT", {"datasets_path": tmp_path}),
+        patch("pyrit.models.seeds.seed_objective.PATHS_DICT", {"datasets_path": tmp_path}),
+    ):
+        seed_class(value=source, data_type="text", is_jinja_template=True)
+
+    assert list(tmp_path.iterdir()) == [secret]
+    assert secret.read_text(encoding="utf-8") == "TOP-SECRET"
+
+
+@pytest.mark.parametrize("seed_class", [SeedPrompt, SeedObjective])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{{ datasets_path.parser.os.environ['PYRIT_TEST_SECRET'] }}",
+        "{{ (datasets_path | attr('parser')).os.environ['PYRIT_TEST_SECRET'] }}",
+        "{{ datasets_path['parser'].os.environ['PYRIT_TEST_SECRET'] }}",
+        "{{ '{0.parser.os.environ}'.format(datasets_path) }}",
+    ],
+)
+def test_trusted_template_cannot_reach_the_os_module_through_a_supplied_path(
+    *, seed_class: type[SeedPrompt | SeedObjective], source: str
+) -> None:
+    with patch.dict("os.environ", {"PYRIT_TEST_SECRET": "leaked-env-value"}):
+        template = seed_class(value=source, data_type="text", is_jinja_template=True)
+
+    assert "leaked-env-value" not in template.value
+
+
+@pytest.mark.parametrize("seed_class", [SeedPrompt, SeedObjective])
+@pytest.mark.parametrize(
+    "access",
+    [
+        "{{ (datasets_path / 'secret.txt').read_text() }}",
+        "{{ (datasets_path / 'pwned.txt').write_text('owned') }}",
+        "{{ datasets_path.parser.os.environ['PYRIT_TEST_SECRET'] }}",
+    ],
+)
+def test_deferred_template_cannot_reach_the_filesystem_through_a_supplied_path(
+    *, seed_class: type[SeedPrompt | SeedObjective], access: str, tmp_path: pathlib.Path
+) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP-SECRET", encoding="utf-8")
+    source = "{% if flag %}{{ prompt }}{% endif %}" + access
+    with (
+        patch.dict("os.environ", {"PYRIT_TEST_SECRET": "leaked-env-value"}),
+        patch("pyrit.models.seeds.seed_prompt.PATHS_DICT", {"datasets_path": tmp_path}),
+        patch("pyrit.models.seeds.seed_objective.PATHS_DICT", {"datasets_path": tmp_path}),
+    ):
+        template = seed_class(value=source, data_type="text", is_jinja_template=True)
+        reloaded = seed_class(value=template.value, data_type="text")
+        with pytest.raises(ValueError, match="Error rendering template") as error:
+            reloaded.render_template_value(flag=True, prompt="rainbows")
+
+    assert template.value.startswith("{% set datasets_path = ")
+    assert template.value.endswith(source)
+    leaked = template.value + str(error.value)
+    assert "TOP-SECRET" not in leaked
+    assert "leaked-env-value" not in leaked
+    assert list(tmp_path.iterdir()) == [secret]
+
+
+@pytest.mark.parametrize("seed_class", [SeedPrompt, SeedObjective])
+def test_untrusted_template_path_filter_does_not_expose_the_os_module(
+    seed_class: type[SeedPrompt | SeedObjective],
+) -> None:
+    template = seed_class(
+        value="{{ ('sample' | pyrit_path).parser.os.environ['PYRIT_TEST_SECRET'] }}",
+        data_type="text",
+    )
+
+    with (
+        patch.dict("os.environ", {"PYRIT_TEST_SECRET": "leaked-env-value"}),
+        pytest.raises(ValueError, match="Error rendering template") as error,
+    ):
+        template.render_template_value()
+
+    assert "leaked-env-value" not in str(error.value)
+
+
+@pytest.mark.parametrize(("name", "path"), list(PATHS_DICT.items()))
+def test_trusted_template_formats_every_path_constant_unchanged(*, name: str, path: pathlib.Path) -> None:
+    template = SeedPrompt(value="{{ " + name + " }}", data_type="text", is_jinja_template=True)
+
+    assert template.value == str(path)
+
+
+@pytest.mark.parametrize("bound", [None, False, 0, (), ("rainbows",), ["rainbows"], {"label": "rainbows"}])
+@pytest.mark.parametrize("seed_class", [SeedPrompt, SeedObjective])
+def test_deferred_template_preserves_typed_supplied_values(
+    *, seed_class: type[SeedPrompt | SeedObjective], bound: object
+) -> None:
+    with (
+        patch("pyrit.models.seeds.seed_prompt.PATHS_DICT", {"bound": bound}),
+        patch("pyrit.models.seeds.seed_objective.PATHS_DICT", {"bound": bound}),
+    ):
+        template = seed_class(
+            value="{% if flag %}{{ bound == expected }}{% endif %}",
+            data_type="text",
+            is_jinja_template=True,
+        )
+    reloaded = seed_class(value=template.value, data_type="text")
+
+    assert reloaded.render_template_value(flag=True, expected=bound) == "True"
+
+
+def test_deferred_template_without_bound_paths_keeps_control_syntax_verbatim() -> None:
+    source = "Before\n{%- for item in items -%}\n{{ item }}\n{%- endfor -%}\n{% if flag %}yes{% endif %}"
+    template = SeedPrompt(value=source, data_type="text", is_jinja_template=True)
+
+    assert template.value == source
+
+
+@pytest.mark.parametrize("seed_class", [SeedPrompt, SeedObjective])
+def test_deferred_template_keeps_supplied_text_binding(seed_class: type[SeedPrompt | SeedObjective]) -> None:
+    style = "brief 'quoted' \\ style"
+    with (
+        patch("pyrit.models.seeds.seed_prompt.PATHS_DICT", {"style": style}),
+        patch("pyrit.models.seeds.seed_objective.PATHS_DICT", {"style": style}),
+    ):
+        template = seed_class(
+            value="{{ style.upper() }} {% if flag %}{{ prompt }}{% endif %}",
+            data_type="text",
+            is_jinja_template=True,
+        )
+
+    reloaded = seed_class(value=template.value, data_type="text")
+    assert reloaded.render_template_value(flag=True, prompt="rainbows") == f"{style.upper()} rainbows"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{% for item in items %}{{ item }}{% endfor %}",
+        "{% for key, value in items %}{{ key }}{{ value }}{% endfor %}",
+        "{% set rows = items %}{% for row in rows %}{{ row }}{% endfor %}",
+        "{% macro show(rows) %}{% for row in rows %}{{ row }}{% endfor %}{% endmacro %}{{ show(items) }}",
+    ],
+)
+def test_partial_render_preserves_unresolved_loop_collection(source: str) -> None:
+    template = SeedPrompt(value=source, data_type="text", is_jinja_template=True)
+
+    assert template.render_template_value_silent() == source
+
+
+def test_render_template_value_silent_decides_conditions_as_before():
+    template = SeedPrompt(
+        value="{{ style }} {% if prompt %}{{ prompt }}{% endif %}", data_type="text", is_jinja_template=True
+    )
+
+    assert template.render_template_value_silent(style="brief") == "brief {{ prompt }}"
+
+
+def test_render_template_value_silent_renders_condition_once_its_parameters_are_provided():
+    template = SeedPrompt(
+        value="{% if flag %}{{ datasets_path }} {{ prompt }}{% endif %}",
+        data_type="text",
+        is_jinja_template=True,
+    )
+
+    assert template.render_template_value_silent(flag=True) == f"{DATASETS_PATH} {{{{ prompt }}}}"
+
+
+def test_render_template_value_silent_renders_if_guard_on_loop_variable():
+    seed = SeedPrompt(
+        value="{% for item in items %}{% if item %}[{{ item }}]{% endif %}{% endfor %}",
+        data_type="text",
+        is_jinja_template=True,
+    )
+
+    assert seed.render_template_value_silent(items=["a", "", "b"]) == "[a][b]"
+
+
+_CONVERSATION_CONTEXT_TEMPLATES = sorted(
+    path
+    for path in pathlib.Path(DATASETS_PATH, "executors").rglob("*.yaml")
+    if "{% if conversation_context %}" in path.read_text(encoding="utf-8")
+)
+
+
+@pytest.mark.parametrize("template_path", _CONVERSATION_CONTEXT_TEMPLATES, ids=lambda path: path.stem)
+@pytest.mark.parametrize("conversation_context", [None, "<context>"])
+def test_loaded_template_renders_like_its_source(template_path, conversation_context):
+    seed_prompt = SeedPrompt.from_yaml_file(template_path)
+    parameters = {name: f"<{name}>" for name in seed_prompt.parameters or []}
+    parameters["conversation_context"] = conversation_context
+    source = yaml.safe_load(template_path.read_text(encoding="utf-8"))["value"]
+
+    expected = SandboxedEnvironment(undefined=StrictUndefined).from_string(source).render(**parameters)
+
+    assert seed_prompt.render_template_value(**parameters) == expected
+    assert ("<context>" in expected) == (conversation_context is not None)
 
 
 def test_seed_group_untrusted_auto_escapes():
@@ -354,7 +794,7 @@ async def test_group_seed_groups_from_yaml(sqlite_instance):
         seeds=[s for s in prompts.seeds if isinstance(s, SeedPrompt)], added_by="rlundeen"
     )
 
-    groups = sqlite_instance.get_seed_groups()
+    groups = await sqlite_instance.get_seed_groups_async()
     # there are 6 SeedPrompts, but only 5 unique SeedGroups (two prompts share a group)
     assert len(groups) == 5
 
@@ -367,7 +807,7 @@ async def test_group_seed_prompt_alias_sets_group_id(sqlite_instance):
         seeds=[s for s in prompts.seeds if isinstance(s, SeedPrompt)], added_by="rlundeen"
     )
 
-    groups = sqlite_instance.get_seed_groups()
+    groups = await sqlite_instance.get_seed_groups_async()
     # there are 6 SeedPrompts, but only 5 unique SeedGroups (two prompts share a group)
     assert len(groups) == 5
 
@@ -593,7 +1033,7 @@ async def test_memory_encoding_metadata_image(tmp_path, sqlite_instance):
         data_type="image_path",
     )
     await sqlite_instance.add_seeds_to_memory_async(seeds=[sp], added_by="test")
-    entry = sqlite_instance.get_seeds()[0]
+    entry = (await sqlite_instance.get_seeds_async())[0]
     assert len(entry.metadata) == 1
     assert entry.metadata["format"] == "png"
 
@@ -621,7 +1061,7 @@ async def test_memory_encoding_metadata_audio(mock_tinytag, sqlite_instance):
     mock_tinytag.get.return_value = mock_tag
 
     await sqlite_instance.add_seeds_to_memory_async(seeds=[sp], added_by="test")
-    entry = sqlite_instance.get_seeds()[0]
+    entry = (await sqlite_instance.get_seeds_async())[0]
     assert entry.metadata["format"] == "wav"
     assert entry.metadata["bitrate"] == 128
     assert entry.metadata["samplerate"] == 44100
@@ -820,6 +1260,195 @@ metadata:
     assert seed_prompt.metadata is not None
     assert seed_prompt.metadata["complexity"] == "high"
     assert seed_prompt.metadata["version"] == 1
+
+
+def test_from_value_with_required_parameters_wraps_inline_string():
+    """An inline string is trusted and wrapped in a Jinja SeedPrompt declaring required_parameters."""
+    seed_prompt = SeedPrompt.from_value_with_required_parameters(
+        "persona {{ objective }}", required_parameters=["objective"]
+    )
+
+    assert seed_prompt.value == "persona {{ objective }}"
+    assert seed_prompt.is_jinja_template is True
+    assert seed_prompt.parameters == ["objective"]
+
+
+def test_from_value_with_required_parameters_returns_valid_seed_prompt_unchanged():
+    """An explicitly provided SeedPrompt declaring all required parameters is returned as-is."""
+    provided = SeedPrompt(value="persona {{ objective }}", data_type="text", parameters=["objective"])
+
+    seed_prompt = SeedPrompt.from_value_with_required_parameters(provided, required_parameters=["objective"])
+
+    assert seed_prompt is provided
+
+
+def test_from_value_with_required_parameters_raises_for_missing_parameter():
+    """An explicitly provided SeedPrompt missing a required parameter raises with a default message."""
+    provided = SeedPrompt(value="persona", data_type="text", parameters=[])
+
+    with pytest.raises(ValueError, match="prompt is missing required parameters: \\['objective'\\]"):
+        SeedPrompt.from_value_with_required_parameters(provided, required_parameters=["objective"])
+
+
+def test_from_value_with_required_parameters_default_message_uses_component_name():
+    """The default failure message names the component being validated."""
+    provided = SeedPrompt(value="persona", data_type="text", parameters=[])
+
+    with pytest.raises(ValueError, match="system_prompt_prefix is missing required parameters"):
+        SeedPrompt.from_value_with_required_parameters(
+            provided, required_parameters=["objective"], component_name="system_prompt_prefix"
+        )
+
+
+def test_from_value_with_required_parameters_custom_error_message():
+    """A supplied error_message replaces the default failure message entirely."""
+    provided = SeedPrompt(value="persona", data_type="text", parameters=[])
+
+    with pytest.raises(ValueError, match="^Custom failure message$"):
+        SeedPrompt.from_value_with_required_parameters(
+            provided,
+            required_parameters=["objective"],
+            error_message="Custom failure message",
+            component_name="system_prompt_prefix",
+        )
+
+
+@pytest.mark.parametrize("value", ["plain static text", "text with {curly} but no jinja", ""])
+def test_reject_jinja_syntax_allows_static_text(value):
+    """Values without Jinja delimiters are accepted without raising."""
+    SeedPrompt.reject_jinja_syntax(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["persona {{ objective }}", "{% if objective %}x{% endif %}", "{# a comment #}"],
+)
+def test_reject_jinja_syntax_raises_for_jinja_delimiters(value):
+    """Values containing any Jinja delimiter ('{{', '{%', '{#') raise with the default component name."""
+    with pytest.raises(ValueError, match="^prompt must be static text without Jinja syntax\\.$"):
+        SeedPrompt.reject_jinja_syntax(value)
+
+
+def test_reject_jinja_syntax_uses_custom_component_name():
+    """The failure message names the caller-supplied component rather than the default."""
+    with pytest.raises(ValueError, match="^adversarial_system_prompt_prefix must be static text"):
+        SeedPrompt.reject_jinja_syntax("persona {{ objective }}", component_name="adversarial_system_prompt_prefix")
+
+
+def test_compose_with_prefix_joins_prefix_and_base():
+    """The prefix and base prompt are joined with a blank line between them, prefix first."""
+    base = SeedPrompt(
+        value="base persona {{ objective }}", data_type="text", parameters=["objective"], is_jinja_template=True
+    )
+
+    combined = SeedPrompt.compose_with_prefix(base_prompt=base, prefix="extra rules", required_parameters=["objective"])
+
+    assert combined.value == "extra rules\n\nbase persona {{ objective }}"
+    assert combined.is_jinja_template is True
+    assert combined.parameters == ["objective"]
+
+
+def test_compose_with_prefix_preserves_untrusted_base_trust_marker():
+    """An untrusted base must not be promoted to a template, which would render its raw wrapper."""
+    base = SeedPrompt(
+        value=SeedPrompt.escape_for_jinja("payload {% endraw %}{{ 7*7 }}{% raw %} tail"),
+        data_type="text",
+        is_jinja_template=False,
+    )
+
+    combined = SeedPrompt.compose_with_prefix(base_prompt=base, prefix="extra rules", required_parameters=[])
+
+    assert combined.is_jinja_template is False
+    assert "49" not in combined.value
+    assert combined.value == f"extra rules\n\n{base.value}"
+
+
+def test_compose_with_prefix_preserves_untrusted_prefix_trust_marker():
+    """An untrusted SeedPrompt prefix also blocks promotion, since its text lands in the result."""
+    base = SeedPrompt(value="base {{ objective }}", data_type="text", parameters=["objective"], is_jinja_template=True)
+    prefix = SeedPrompt(value="untrusted rules", data_type="text", parameters=["objective"], is_jinja_template=False)
+
+    combined = SeedPrompt.compose_with_prefix(base_prompt=base, prefix=prefix, required_parameters=["objective"])
+
+    assert combined.is_jinja_template is False
+
+
+def test_compose_with_prefix_joins_seed_prompt_prefix_and_base():
+    """An explicitly provided SeedPrompt prefix contributes its own resolved value verbatim."""
+    base = SeedPrompt(value="base {{ objective }}", data_type="text", parameters=["objective"])
+    prefix = SeedPrompt(value="extra {{ objective }} rules", data_type="text", parameters=["objective"])
+
+    combined = SeedPrompt.compose_with_prefix(base_prompt=base, prefix=prefix, required_parameters=["objective"])
+
+    assert combined.value == "extra {{ objective }} rules\n\nbase {{ objective }}"
+
+
+def test_compose_with_prefix_raises_for_inline_prefix_with_jinja_syntax():
+    """An inline string prefix containing Jinja delimiters is rejected as non-static."""
+    base = SeedPrompt(value="base {{ objective }}", data_type="text", parameters=["objective"])
+
+    with pytest.raises(ValueError, match="prefix must be static text without Jinja syntax"):
+        SeedPrompt.compose_with_prefix(
+            base_prompt=base, prefix="extra {{ objective }}", required_parameters=["objective"]
+        )
+
+
+def test_compose_with_prefix_allows_seed_prompt_prefix_with_jinja_syntax():
+    """A SeedPrompt prefix is exempt from the static-text restriction since it's a deliberate template."""
+    base = SeedPrompt(value="base {{ objective }}", data_type="text", parameters=["objective"])
+    prefix = SeedPrompt(value="extra {{ objective }}", data_type="text", parameters=["objective"])
+
+    combined = SeedPrompt.compose_with_prefix(base_prompt=base, prefix=prefix, required_parameters=["objective"])
+
+    assert combined.value == "extra {{ objective }}\n\nbase {{ objective }}"
+
+
+def test_compose_with_prefix_raises_for_prefix_missing_parameter():
+    """A prefix SeedPrompt missing a required parameter raises, naming the prefix component."""
+    base = SeedPrompt(value="base {{ objective }}", data_type="text", parameters=["objective"])
+    prefix = SeedPrompt(value="extra rules", data_type="text", parameters=[])
+
+    with pytest.raises(ValueError, match="prefix is missing required parameters"):
+        SeedPrompt.compose_with_prefix(base_prompt=base, prefix=prefix, required_parameters=["objective"])
+
+
+def test_compose_with_prefix_keeps_base_response_json_schema():
+    """When only the base prompt declares a response_json_schema, the combined prompt keeps it."""
+    schema = {"type": "object", "properties": {"next_message": {"type": "string"}}}
+    base = SeedPrompt(
+        value="base {{ objective }}", data_type="text", parameters=["objective"], response_json_schema=schema
+    )
+
+    combined = SeedPrompt.compose_with_prefix(base_prompt=base, prefix="extra rules", required_parameters=["objective"])
+
+    assert combined.response_json_schema == schema
+
+
+def test_compose_with_prefix_uses_prefix_response_json_schema_when_base_has_none():
+    """When only the prefix declares a response_json_schema, the combined prompt uses it."""
+    schema = {"type": "object", "properties": {"next_message": {"type": "string"}}}
+    base = SeedPrompt(value="base {{ objective }}", data_type="text", parameters=["objective"])
+    prefix = SeedPrompt(
+        value="extra {{ objective }}", data_type="text", parameters=["objective"], response_json_schema=schema
+    )
+
+    combined = SeedPrompt.compose_with_prefix(base_prompt=base, prefix=prefix, required_parameters=["objective"])
+
+    assert combined.response_json_schema == schema
+
+
+def test_compose_with_prefix_raises_when_both_declare_response_json_schema():
+    """Declaring a response_json_schema on both the base prompt and the prefix is ambiguous."""
+    schema = {"type": "object", "properties": {"next_message": {"type": "string"}}}
+    base = SeedPrompt(
+        value="base {{ objective }}", data_type="text", parameters=["objective"], response_json_schema=schema
+    )
+    prefix = SeedPrompt(
+        value="extra {{ objective }}", data_type="text", parameters=["objective"], response_json_schema=schema
+    )
+
+    with pytest.raises(ValueError, match="Both the prompt and prefix declare a response_json_schema"):
+        SeedPrompt.compose_with_prefix(base_prompt=base, prefix=prefix, required_parameters=["objective"])
 
 
 def test_seed_group_dict_with_seed_type_objective():
@@ -1069,8 +1698,8 @@ def test_seed_dataset_dict_to_seed_simulated_conversation_all_base_params(tmp_pa
 
     # Verify SeedSimulatedConversation-specific fields
     assert seed.num_turns == 5
-    assert seed.adversarial_chat_system_prompt_path == pathlib.Path(adv_path)
-    assert seed.simulated_target_system_prompt_path == pathlib.Path(sim_path)
+    assert seed.adversarial_chat_system_prompt.value == "You are adversarial"
+    assert seed.simulated_target_system_prompt.parameters == ["objective", "num_turns"]
 
 
 def test_seed_dataset_uses_dataset_defaults_for_missing_params():

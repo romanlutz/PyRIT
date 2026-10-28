@@ -55,7 +55,7 @@ class _RedTeamSocialBiasDataset(_RemoteDatasetLoader):
         return "red_team_social_bias"
 
     @override
-    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
+    async def _fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch Red Team Social Bias dataset and return as SeedDataset.
 
@@ -121,6 +121,8 @@ class _RedTeamSocialBiasDataset(_RemoteDatasetLoader):
                             data_type="text",
                             dataset_name=self.dataset_name,
                             prompt_group_id=group_id,
+                            # Only user turns are kept, and a group with several sequences needs a role on each
+                            role="user",
                             sequence=i,
                             harm_categories=harm_categories,
                             description=description,

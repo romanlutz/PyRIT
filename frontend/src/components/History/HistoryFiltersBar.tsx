@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Button,
   Tooltip,
@@ -8,13 +8,54 @@ import {
   Switch,
   mergeClasses,
 } from '@fluentui/react-components'
-import {
-  FilterRegular,
-  FilterDismissRegular,
-} from '@fluentui/react-icons'
+import { useActiveDescendantContext } from '@fluentui/react-aria'
+import type { ActiveDescendantImperativeRef } from '@fluentui/react-aria'
+import { FilterDismissRegular } from '@fluentui/react-icons'
+import { Virtualizer, useStaticVirtualizerMeasure } from '@fluentui-contrib/react-virtualizer'
+import SearchableMultiCombobox from '@/components/SearchableMultiCombobox'
+import type { FilterOption } from '@/types'
 import { DEFAULT_HISTORY_FILTERS } from './historyFilters'
 import type { HistoryFilters } from './historyFilters'
 import { useAttackHistoryStyles } from './AttackHistory.styles'
+
+const LABEL_OPTION_HEIGHT_PX = 32
+// Rendered before the listbox has been measured (jsdom never fires the observer).
+const LABEL_FALLBACK_RENDERED_OPTIONS = 12
+// Marks each option with its index in the filtered list so Home/End can locate
+// it in the DOM once the virtualizer mounts it.
+const LABEL_OPTION_INDEX_ATTR = 'data-label-index'
+// The virtualizer mounts newly revealed options after a React commit, so Home/End
+// activation retries on animation frames until the target option exists.
+const LABEL_ACTIVATION_ATTEMPTS = 30
+
+const scheduleLabelActivation = (step: () => void) => {
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(step)
+  } else {
+    setTimeout(step, 16)
+  }
+}
+
+/**
+ * Fluent drives combobox keyboard navigation through an active descendant
+ * controller installed around the listbox options. The virtualized label list
+ * needs that controller for Home and End, so this component reads it from
+ * context and hands it to the filter bar through a ref. It renders nothing.
+ */
+function LabelActiveDescendantBridge({
+  controllerRef,
+}: {
+  controllerRef: React.RefObject<ActiveDescendantImperativeRef | null>
+}) {
+  const { controller } = useActiveDescendantContext()
+  useEffect(() => {
+    controllerRef.current = controller
+    return () => {
+      controllerRef.current = null
+    }
+  }, [controller, controllerRef])
+  return null
+}
 
 const NO_CONVERTERS_SENTINEL = '__no_converters__'
 
@@ -35,57 +76,9 @@ function formatMultiSelectValue(selected: string[]): string {
   return `${selected[0]} (+${selected.length - 1})`
 }
 
-interface SearchableMultiComboboxProps {
-  placeholder: string
-  selectedOptions: string[]
-  options: string[]
-  onSelect: (selected: string[]) => void
-  testid: string
-  className?: string
-}
-
-function SearchableMultiCombobox({
-  placeholder,
-  selectedOptions,
-  options,
-  onSelect,
-  testid,
-  className,
-}: SearchableMultiComboboxProps) {
-  const [open, setOpen] = useState(false)
-  const [search, setSearch] = useState('')
-
-  const filtered = search
-    ? options.filter((o) => o.toLowerCase().includes(search.toLowerCase()))
-    : options
-
-  return (
-    <Combobox
-      className={className}
-      placeholder={placeholder}
-      multiselect
-      freeform
-      open={open}
-      onOpenChange={(_e, data) => {
-        setOpen(data.open)
-        // Clear search text both when opening (start fresh) and when closing
-        // (so the formatted value is shown again).
-        setSearch('')
-      }}
-      selectedOptions={selectedOptions}
-      value={open ? search : formatMultiSelectValue(selectedOptions)}
-      onChange={(e) => setSearch((e.target as HTMLInputElement).value)}
-      onOptionSelect={(_e, data) => {
-        onSelect(data.selectedOptions)
-        setSearch('')
-      }}
-      data-testid={testid}
-    >
-      {filtered.map((o) => (
-        <Option key={o} value={o}>{o}</Option>
-      ))}
-    </Combobox>
-  )
+/** History's choices are plain strings, shown as they are. */
+function toFilterOptions(values: string[]): FilterOption[] {
+  return values.map((value: string) => ({ value, label: value }))
 }
 
 interface HistoryFiltersBarProps {
@@ -94,7 +87,7 @@ interface HistoryFiltersBarProps {
   attackTypeOptions: string[]
   converterOptions: string[]
   operatorOptions: string[]
-  operationOptions: string[]
+  operationOptions: FilterOption[]
   otherLabelOptions: string[]
 }
 
@@ -115,8 +108,9 @@ export default function HistoryFiltersBar({
     converter: converterFilter,
     converterMatchMode,
     hasConverters,
+    includeScenarioAttacks,
     operator: operatorFilters,
-    operation: operationFilters,
+    operationId: operationFilters,
     otherLabels: otherLabelFilters,
     labelSearchText,
   } = filters
@@ -130,6 +124,7 @@ export default function HistoryFiltersBar({
     outcomeFilter ||
     converterFilter.length > 0 ||
     hasConverters !== undefined ||
+    !includeScenarioAttacks ||
     operatorFilters.length > 0 ||
     operationFilters.length > 0 ||
     otherLabelFilters.length > 0
@@ -163,160 +158,255 @@ export default function HistoryFiltersBar({
   const converterMatchesSearch = (c: string) =>
     !converterSearch || c.toLowerCase().includes(converterSearch.toLowerCase())
   const filteredConverterOptions = converterOptions.filter(converterMatchesSearch)
+  const filteredLabelOptions = otherLabelOptions.filter(
+    l => !labelSearchText || l.toLowerCase().includes(labelSearchText.toLowerCase()),
+  )
+  // The label list can reach hundreds of entries, so it renders through a virtualizer
+  // instead of capping the visible options and asking the user to search further.
+  // The virtualized window scrolls inside its own bounded surface: autoSize gives
+  // the popup an inline max height of its own, which would override a max height
+  // set on the listbox element, so the scroll container is a child Fluent never
+  // styles.
+  const labelListMeasure = useStaticVirtualizerMeasure<HTMLElement>({
+    defaultItemSize: LABEL_OPTION_HEIGHT_PX,
+    direction: 'vertical',
+  })
+  const labelListScrollRef = labelListMeasure.scrollRef
+  const [labelOpen, setLabelOpen] = useState(false)
+  const labelActiveDescendant = useRef<ActiveDescendantImperativeRef | null>(null)
+  const labelScrollSurface = useRef<HTMLDivElement | null>(null)
+  // Identifies the newest Home/End activation request so stale retries abort.
+  const labelActivationRequest = useRef(0)
+  const setLabelScrollSurface = useCallback(
+    (el: HTMLDivElement | null) => {
+      labelScrollSurface.current = el
+      labelListScrollRef(el)
+    },
+    [labelListScrollRef],
+  )
+
+  // Re-anchor the list at the top when the popup opens or the search changes:
+  // the scroll surface survives close and reopen, so without this a reopened
+  // popup would resume partway down the previous result set.
+  useEffect(() => {
+    // Invalidate any pending activation along with the re-anchor; a retry
+    // that fires after unmount finds the surface ref already cleared.
+    labelActivationRequest.current++
+    if (labelOpen) labelScrollSurface.current?.scrollTo({ top: 0 })
+  }, [labelOpen, labelSearchText])
+
+  // Fluent's Home and End walk only the options currently mounted in the DOM,
+  // which inside a virtualized list is the visible window instead of the whole
+  // filtered set. Handle both keys against the full list: jump the scroll
+  // surface so the target option mounts, then activate it through the same
+  // controller Fluent's arrow navigation uses.
+  const activateLabelOption = (requestId: number, targetIndex: number, attemptsLeft: number) => {
+    if (requestId !== labelActivationRequest.current) return
+    const surface = labelScrollSurface.current
+    const target = surface?.querySelector<HTMLElement>(`[${LABEL_OPTION_INDEX_ATTR}="${targetIndex}"]`)
+    if (target) {
+      labelActiveDescendant.current?.focus(target.id)
+    } else if (attemptsLeft > 0) {
+      scheduleLabelActivation(() => activateLabelOption(requestId, targetIndex, attemptsLeft - 1))
+    }
+  }
+
+  const handleLabelKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (!labelOpen || (event.key !== 'Home' && event.key !== 'End')) return
+    event.preventDefault()
+    event.stopPropagation()
+    const targetIndex = event.key === 'Home' ? 0 : filteredLabelOptions.length - 1
+    if (targetIndex < 0) return
+    const surface = labelScrollSurface.current
+    if (surface) surface.scrollTop = targetIndex * LABEL_OPTION_HEIGHT_PX
+    activateLabelOption(++labelActivationRequest.current, targetIndex, LABEL_ACTIVATION_ATTEMPTS)
+  }
 
   return (
     <div className={styles.filters}>
-      <FilterRegular />
-      {hasActiveFilters && (
+      <div className={styles.filterRow}>
         <Tooltip content="Reset all filters" relationship="label">
           <Button
+            className={styles.touchTargetHeight}
             appearance="subtle"
             size="small"
             icon={<FilterDismissRegular />}
+            aria-label="Reset all filters"
+            disabledFocusable={!hasActiveFilters}
             onClick={() => onFiltersChange({ ...DEFAULT_HISTORY_FILTERS })}
             data-testid="reset-filters-btn"
-          >
-            Reset
-          </Button>
+          />
         </Tooltip>
-      )}
-      <SearchableMultiCombobox
-        className={styles.filterDropdown}
-        placeholder="All attack types"
-        selectedOptions={attackTypeFilters}
-        options={attackTypeOptions}
-        onSelect={(selected) => setFilter('attackTypes', selected)}
-        testid="attack-type-filter"
-      />
-      <Combobox
-        className={styles.filterDropdown}
-        placeholder="All outcomes"
-        value={OUTCOME_LABELS[outcomeFilter] ?? ''}
-        selectedOptions={outcomeFilter ? [outcomeFilter] : []}
-        onOptionSelect={(_e, data) =>
-          setFilter('outcome', data.selectedOptions[0] ?? '')
-        }
-        data-testid="outcome-filter"
-      >
-        <Option value="">All outcomes</Option>
-        <Option value="success">Success</Option>
-        <Option value="failure">Failure</Option>
-        <Option value="error">Error</Option>
-        <Option value="undetermined">Undetermined</Option>
-      </Combobox>
-      <Combobox
-        className={styles.filterDropdown}
-        placeholder="All converters"
-        multiselect
-        freeform
-        open={converterOpen}
-        onOpenChange={(_e, data) => {
-          setConverterOpen(data.open)
-          setConverterSearch('')
-        }}
-        selectedOptions={converterSelectedOptions}
-        value={
-          converterOpen
-            ? converterSearch
-            : hasConverters === false
-              ? '(No converters)'
-              : formatMultiSelectValue(converterFilter)
-        }
-        onChange={(e) => setConverterSearch((e.target as HTMLInputElement).value)}
-        onOptionSelect={(_e, data) => {
-          handleConverterSelect(data.selectedOptions)
-          setConverterSearch('')
-        }}
-        data-testid="converter-filter"
-      >
-        <OptionGroup label="Special">
-          <Option value={NO_CONVERTERS_SENTINEL} text="(No converters)">(No converters)</Option>
-        </OptionGroup>
-        <OptionGroup label="Converters">
-          {filteredConverterOptions.map((c) => (
-            <Option key={c} value={c}>{c}</Option>
-          ))}
-        </OptionGroup>
-      </Combobox>
-      {showMatchModeToggle && (
-        <Tooltip
-          content={
-            converterMatchMode === 'all'
-              ? 'Attack must use ALL selected converters'
-              : 'Attack must use ANY of the selected converters'
+        <SearchableMultiCombobox
+          className={styles.filterDropdown}
+          placeholder="All operators"
+          selectedOptions={operatorFilters}
+          options={toFilterOptions(operatorOptions)}
+          onSelect={(selected) => setFilter('operator', selected)}
+          testId="operator-filter"
+        />
+        <SearchableMultiCombobox
+          className={styles.filterDropdown}
+          placeholder="All operations"
+          selectedOptions={operationFilters}
+          options={operationOptions}
+          onSelect={(selected) => setFilter('operationId', selected)}
+          testId="operation-filter"
+        />
+        <Combobox
+          className={styles.filterDropdown}
+          placeholder="All outcomes"
+          value={OUTCOME_LABELS[outcomeFilter] ?? ''}
+          selectedOptions={outcomeFilter ? [outcomeFilter] : []}
+          onOptionSelect={(_e, data) =>
+            setFilter('outcome', data.selectedOptions[0] ?? '')
           }
-          relationship="label"
+          data-testid="outcome-filter"
         >
-          <span className={styles.matchModeToggle}>
-            <span className={styles.matchModeLabel}>Converters:</span>
-            <span
-              className={mergeClasses(
-                styles.matchModeLabel,
-                converterMatchMode === 'any' && styles.matchModeLabelActive,
-              )}
-              data-testid="converter-match-mode-label-any"
+          <Option value="">All outcomes</Option>
+          <Option value="success">Success</Option>
+          <Option value="failure">Failure</Option>
+          <Option value="error">Error</Option>
+          <Option value="undetermined">Undetermined</Option>
+        </Combobox>
+        <Combobox
+          className={styles.filterDropdown}
+          placeholder="Filter labels..."
+          multiselect
+          selectedOptions={otherLabelFilters}
+          onOptionSelect={(_e, data) => {
+            onFiltersChange({ ...filters, otherLabels: data.selectedOptions, labelSearchText: '' })
+          }}
+          value={labelSearchText}
+          onChange={(e) => setFilter('labelSearchText', (e.target as HTMLInputElement).value)}
+          onOpenChange={(_e, data) => setLabelOpen(data.open)}
+          onKeyDownCapture={handleLabelKeyDown}
+          data-testid="label-filter"
+          freeform
+          positioning={{ autoSize: true }}
+          listbox={{
+            onKeyDownCapture: handleLabelKeyDown,
+          }}
+        >
+          <LabelActiveDescendantBridge controllerRef={labelActiveDescendant} />
+          <div
+            ref={setLabelScrollSurface}
+            className={styles.labelScrollSurface}
+            data-testid="label-list-scroll-surface"
+          >
+            <Virtualizer
+              numItems={filteredLabelOptions.length}
+              virtualizerLength={labelListMeasure.virtualizerLength || LABEL_FALLBACK_RENDERED_OPTIONS}
+              bufferItems={labelListMeasure.bufferItems}
+              bufferSize={labelListMeasure.bufferSize}
+              itemSize={LABEL_OPTION_HEIGHT_PX}
+              containerSizeRef={labelListMeasure.containerSizeRef}
             >
-              ANY
-            </span>
-            <Switch
-              checked={converterMatchMode === 'all'}
-              onChange={(_e, data) =>
-                setFilter('converterMatchMode', data.checked ? 'all' : 'any')
-              }
-              aria-label={`Match ${converterMatchMode === 'all' ? 'all' : 'any'} selected converters`}
-              data-testid="converter-match-mode-toggle"
-            />
-            <span
-              className={mergeClasses(
-                styles.matchModeLabel,
-                converterMatchMode === 'all' && styles.matchModeLabelActive,
+              {(index: number) => (
+                <Option
+                  key={filteredLabelOptions[index]}
+                  value={filteredLabelOptions[index]}
+                  aria-posinset={index + 1}
+                  aria-setsize={filteredLabelOptions.length}
+                  {...{ [LABEL_OPTION_INDEX_ATTR]: index }}
+                >
+                  {filteredLabelOptions[index]}
+                </Option>
               )}
-              data-testid="converter-match-mode-label-all"
-            >
-              ALL
+            </Virtualizer>
+          </div>
+        </Combobox>
+        <SearchableMultiCombobox
+          className={styles.filterDropdown}
+          placeholder="All attack types"
+          selectedOptions={attackTypeFilters}
+          options={toFilterOptions(attackTypeOptions)}
+          onSelect={(selected) => setFilter('attackTypes', selected)}
+          testId="attack-type-filter"
+        />
+        <Combobox
+          className={styles.filterDropdown}
+          placeholder="All converters"
+          multiselect
+          freeform
+          open={converterOpen}
+          onOpenChange={(_e, data) => {
+            setConverterOpen(data.open)
+            setConverterSearch('')
+          }}
+          selectedOptions={converterSelectedOptions}
+          value={
+            converterOpen
+              ? converterSearch
+              : hasConverters === false
+                ? '(No converters)'
+                : formatMultiSelectValue(converterFilter)
+          }
+          onChange={(e) => setConverterSearch((e.target as HTMLInputElement).value)}
+          onOptionSelect={(_e, data) => {
+            handleConverterSelect(data.selectedOptions)
+            setConverterSearch('')
+          }}
+          data-testid="converter-filter"
+        >
+          <OptionGroup label="Special">
+            <Option value={NO_CONVERTERS_SENTINEL} text="(No converters)">(No converters)</Option>
+          </OptionGroup>
+          <OptionGroup label="Converters">
+            {filteredConverterOptions.map((c) => (
+              <Option key={c} value={c}>{c}</Option>
+            ))}
+          </OptionGroup>
+        </Combobox>
+        {showMatchModeToggle && (
+          <Tooltip
+            content={
+              converterMatchMode === 'all'
+                ? 'Attack must use ALL selected converters'
+                : 'Attack must use ANY of the selected converters'
+            }
+            relationship="label"
+          >
+            <span className={styles.matchModeToggle}>
+              <span className={styles.matchModeLabel}>Converters:</span>
+              <span
+                className={mergeClasses(
+                  styles.matchModeLabel,
+                  converterMatchMode === 'any' && styles.matchModeLabelActive,
+                )}
+                data-testid="converter-match-mode-label-any"
+              >
+                ANY
+              </span>
+              <Switch
+                checked={converterMatchMode === 'all'}
+                onChange={(_e, data) =>
+                  setFilter('converterMatchMode', data.checked ? 'all' : 'any')
+                }
+                aria-label={`Match ${converterMatchMode === 'all' ? 'all' : 'any'} selected converters`}
+                data-testid="converter-match-mode-toggle"
+              />
+              <span
+                className={mergeClasses(
+                  styles.matchModeLabel,
+                  converterMatchMode === 'all' && styles.matchModeLabelActive,
+                )}
+                data-testid="converter-match-mode-label-all"
+              >
+                ALL
+              </span>
             </span>
-          </span>
-        </Tooltip>
-      )}
-      <SearchableMultiCombobox
-        className={styles.filterDropdown}
-        placeholder="All operators"
-        selectedOptions={operatorFilters}
-        options={operatorOptions}
-        onSelect={(selected) => setFilter('operator', selected)}
-        testid="operator-filter"
-      />
-      <SearchableMultiCombobox
-        className={styles.filterDropdown}
-        placeholder="All operations"
-        selectedOptions={operationFilters}
-        options={operationOptions}
-        onSelect={(selected) => setFilter('operation', selected)}
-        testid="operation-filter"
-      />
-      <Combobox
-        className={styles.filterDropdown}
-        placeholder="Filter labels..."
-        multiselect
-        selectedOptions={otherLabelFilters}
-        onOptionSelect={(_e, data) => {
-          onFiltersChange({ ...filters, otherLabels: data.selectedOptions, labelSearchText: '' })
-        }}
-        value={labelSearchText}
-        onChange={(e) => setFilter('labelSearchText', (e.target as HTMLInputElement).value)}
-        data-testid="label-filter"
-        freeform
-      >
-        {otherLabelOptions
-          .filter(l => !labelSearchText || l.toLowerCase().includes(labelSearchText.toLowerCase()))
-          .slice(0, 50)
-          .map(l => (
-            <Option key={l} value={l}>{l}</Option>
-          ))}
-        {otherLabelOptions.filter(l => !labelSearchText || l.toLowerCase().includes(labelSearchText.toLowerCase())).length > 50 && (
-          <Option disabled value="__more" text={`Type to search more...`}>{`Type to search ${otherLabelOptions.length - 50} more...`}</Option>
+          </Tooltip>
         )}
-      </Combobox>
+      </div>
+      <div className={styles.secondaryFilterRow} data-testid="scanner-attack-filter-row">
+        <Switch
+          checked={includeScenarioAttacks}
+          onChange={(_event, data) => setFilter('includeScenarioAttacks', data.checked)}
+          label="Include scanner attacks"
+          data-testid="include-scanner-attacks"
+        />
+      </div>
     </div>
   )
 }

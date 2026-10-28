@@ -1,0 +1,27 @@
+import type { ConverterInputPiece, ConverterPreviewResponse, ConverterPreviewStep, PieceConversion } from '@/types'
+
+/** Converter IDs record stages used, including stages with manually edited output. */
+export function buildAppliedConversions(
+  inputs: ConverterInputPiece[],
+  results: Record<string, ConverterPreviewResponse>,
+): Record<string, PieceConversion> {
+  const applied: Record<string, PieceConversion> = {}
+  for (const input of inputs) {
+    const result = results[input.id]
+    if (!result) continue
+    applied[input.id] = {
+      pieceId: input.id,
+      pieceType: input.pieceType,
+      converterInstanceIds: result.steps.map((step: ConverterPreviewStep) => step.converter_id),
+      ...(result.steps.some((step: ConverterPreviewStep) => step.provenance) ? {
+        converterProvenance: result.steps.map((step: ConverterPreviewStep) => step.provenance ?? null),
+      } : {}),
+      originalValue: input.value,
+      convertedValue: result.converted_value,
+      convertedDataType: result.converted_value_data_type,
+      ...(result.converted_value !== (result.steps[result.steps.length - 1]?.output_value ?? input.value)
+        ? { manuallyEdited: true } : {}),
+    }
+  }
+  return applied
+}

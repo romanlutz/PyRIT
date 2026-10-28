@@ -11,6 +11,10 @@ from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
 from pyrit.models import Modality, SeedDataset, SeedObjective, SeedUnion
 from pyrit.models.harm_category import HarmCategory
 
+# Separator HarmBench uses between a contextual behavior's context and the behavior itself
+# (baselines/direct_request/direct_request.py).
+_CONTEXT_SEPARATOR = "\n\n---\n\n"
+
 
 class _HarmBenchDataset(_RemoteDatasetLoader):
     """
@@ -19,7 +23,7 @@ class _HarmBenchDataset(_RemoteDatasetLoader):
     HarmBench is a standardized evaluation framework for automated red teaming.
     It consists of a dataset of harmful behaviors across multiple categories.
 
-    Reference: https://github.com/centerforaisafety/HarmBench
+    Reference: [@mazeika2024harmbench]
     """
 
     # Metadata
@@ -54,7 +58,7 @@ class _HarmBenchDataset(_RemoteDatasetLoader):
         return "harmbench"
 
     @override
-    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
+    async def _fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch HarmBench dataset and return as SeedDataset.
 
@@ -99,6 +103,10 @@ class _HarmBenchDataset(_RemoteDatasetLoader):
 
             # Extract data
             category = example["SemanticCategory"]
+            context = example.get("ContextString", "")
+            behavior = example["Behavior"]
+            # Contextual behaviors only make sense together with their context (e.g. "Modify this code ...").
+            value = f"{context}{_CONTEXT_SEPARATOR}{behavior}" if context else behavior
 
             # Standardize harm categories
             standardized_categories = self._standardize_harm_categories(
@@ -106,11 +114,12 @@ class _HarmBenchDataset(_RemoteDatasetLoader):
                 alias_overrides=harm_category_alias_overrides,
             )
 
-            metadata: dict[str, str | int] = {key: value for key, value in example.items() if key != "Behavior"}
+            # Keep the full row, including the raw Behavior, since the seed value may add context to it.
+            metadata: dict[str, str | int] = dict(example)
 
             # Create SeedPrompt
             seed_prompt = SeedObjective(
-                value=example["Behavior"],
+                value=value,
                 name="HarmBench Examples",
                 dataset_name=self.dataset_name,
                 harm_categories=standardized_categories,
@@ -119,7 +128,20 @@ class _HarmBenchDataset(_RemoteDatasetLoader):
                     "biological, illegal activities, etc."
                 ),
                 source="https://github.com/centerforaisafety/HarmBench",
-                authors=["Mantas Mazeika", "Long Phan", "Xuwang Yin", "Andy Zou", "Zifan Wang", "Norman Mu"],
+                authors=[
+                    "Mantas Mazeika",
+                    "Long Phan",
+                    "Xuwang Yin",
+                    "Andy Zou",
+                    "Zifan Wang",
+                    "Norman Mu",
+                    "Elham Sakhaee",
+                    "Nathaniel Li",
+                    "Steven Basart",
+                    "Bo Li",
+                    "David Forsyth",
+                    "Dan Hendrycks",
+                ],
                 metadata=metadata,
                 groups=[
                     "University of Illinois Urbana-Champaign",

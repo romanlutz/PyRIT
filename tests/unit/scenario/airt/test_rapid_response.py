@@ -4,22 +4,28 @@
 """Tests for the RapidResponse scenario (refactored from ContentHarms)."""
 
 import pathlib
+import threading
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from pyrit.common.path import DATASETS_PATH
 from pyrit.executor.attack import (
+    AttackStrategy,
+    CrescendoAttack,
     ManyShotJailbreakAttack,
     PromptSendingAttack,
+    SkeletonKeyAttack,
     TreeOfAttacksWithPruningAttack,
 )
-from pyrit.models import AttackSeedGroup, ComponentIdentifier, SeedObjective
+from pyrit.models import AttackSeedGroup, ComponentIdentifier, SeedObjective, TargetIdentifier
+from pyrit.models.seeds import yaml_seed_loader
 from pyrit.prompt_target import PromptTarget
 from pyrit.registry import TargetRegistry
 from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
 from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
-from pyrit.scenario.core.dataset_configuration import CompoundDatasetAttackConfiguration
+from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
 from pyrit.scenario.scenarios.airt.rapid_response import RapidResponse
 from pyrit.score import TrueFalseScorer
 from pyrit.setup.initializers.techniques import (
@@ -41,6 +47,10 @@ def _mock_id(name: str) -> ComponentIdentifier:
     return ComponentIdentifier(class_name=name, class_module="test")
 
 
+def _mock_target_id(name: str) -> TargetIdentifier:
+    return TargetIdentifier(class_name=name, class_module="test")
+
+
 def _technique_class():
     """Get the dynamically-generated RapidResponseTechnique class."""
     from pyrit.scenario.scenarios.airt.rapid_response import _build_rapid_response_technique
@@ -56,14 +66,14 @@ def _technique_class():
 @pytest.fixture
 def mock_objective_target():
     mock = MagicMock(spec=PromptTarget)
-    mock.get_identifier.return_value = _mock_id("MockObjectiveTarget")
+    mock.get_identifier.return_value = _mock_target_id("MockObjectiveTarget")
     return mock
 
 
 @pytest.fixture
 def mock_adversarial_target():
     mock = MagicMock(spec=PromptTarget)
-    mock.get_identifier.return_value = _mock_id("MockAdversarialTarget")
+    mock.get_identifier.return_value = _mock_target_id("MockAdversarialTarget")
     return mock
 
 
@@ -90,6 +100,7 @@ def reset_technique_registry():
 
     adv_target = MagicMock(spec=PromptTarget)
     adv_target.capabilities.includes.return_value = True
+    adv_target.get_identifier.return_value = _mock_target_id("MockAdversarialTarget")
     TargetRegistry.get_registry_singleton().instances.register(adv_target, name="adversarial_chat")
 
     technique_registry = AttackTechniqueRegistry.get_registry_singleton()
@@ -143,7 +154,49 @@ ALL_HARM_CATEGORIES = ["hate", "fairness", "violence", "sexual", "harassment", "
 ALL_HARM_SEED_GROUPS = {cat: _make_seed_groups(cat) for cat in ALL_HARM_CATEGORIES}
 
 
-FIXTURES = ["patch_central_database", "mock_runtime_env"]
+FIXTURES = ["patch_central_database", "mock_runtime_env", "mock_dataset_preparation"]
+
+
+@pytest.mark.usefixtures(*FIXTURES)
+@pytest.mark.parametrize(
+    "attack_class",
+    [ManyShotJailbreakAttack, CrescendoAttack, TreeOfAttacksWithPruningAttack, SkeletonKeyAttack],
+)
+async def test_matrix_attack_templates_are_loaded_off_loop_async(
+    *,
+    attack_class: type[AttackStrategy[Any, Any]],
+    mock_objective_target: PromptTarget,
+    mock_objective_scorer: TrueFalseScorer,
+) -> None:
+    from pyrit.scenario.scenarios.airt.rapid_response import _build_rapid_response_technique
+
+    registry = AttackTechniqueRegistry()
+    registry.register_from_factories(
+        [AttackTechniqueFactory(name="disk_backed", attack_class=attack_class, technique_tags=["light"])]
+    )
+    backend_thread = threading.get_ident()
+    original_load = yaml_seed_loader._read_yaml
+
+    def load_template(file: str | pathlib.Path) -> dict[str, Any]:
+        assert threading.get_ident() != backend_thread
+        return original_load(file)
+
+    _build_rapid_response_technique.cache_clear()
+    with (
+        patch.object(AttackTechniqueRegistry, "get_registry_singleton", return_value=registry),
+        patch.object(
+            DatasetAttackConfiguration,
+            "get_attack_groups_by_dataset_async",
+            return_value={"local": _make_seed_groups("local")},
+        ),
+    ):
+        scenario = RapidResponse(objective_scorer=mock_objective_scorer)
+        scenario.set_params_from_args(args={"objective_target": mock_objective_target, "include_baseline": False})
+        with patch.object(yaml_seed_loader, "_read_yaml", side_effect=load_template) as read:
+            await scenario.initialize_async()
+        assert read.call_count > 0
+        assert len(scenario._atomic_attacks) == 1
+        assert isinstance(scenario._atomic_attacks[0].attack_technique.attack, attack_class)
 
 
 # ===========================================================================
@@ -155,8 +208,8 @@ FIXTURES = ["patch_central_database", "mock_runtime_env"]
 class TestRapidResponseBasic:
     """Tests for RapidResponse initialization and class properties."""
 
-    def test_version_is_2(self):
-        assert RapidResponse.VERSION == 2
+    def test_version_is_3(self):
+        assert RapidResponse.VERSION == 3
 
     def test_get_technique_class(self, mock_objective_scorer):
         strat = _technique_class()
@@ -170,14 +223,17 @@ class TestRapidResponseBasic:
         with patch(
             "pyrit.scenario.core.scenario.Scenario._get_default_objective_scorer", return_value=mock_objective_scorer
         ):
-            assert RapidResponse()._default_technique == strat.DEFAULT
+            default = RapidResponse()._default_technique
+        assert default == strat.DEFAULT
+        # DEFAULT is built from default_tags={"light"}, so it expands to the light-tagged techniques.
+        assert strat.expand({strat.DEFAULT}) == strat.expand({strat.LIGHT})
 
     def test_default_dataset_config_has_all_harm_datasets(self, mock_objective_scorer):
         with patch(
             "pyrit.scenario.core.scenario.Scenario._get_default_objective_scorer", return_value=mock_objective_scorer
         ):
             config = RapidResponse()._default_dataset_config
-        assert isinstance(config, CompoundDatasetAttackConfiguration)
+        assert isinstance(config, DatasetAttackConfiguration)
         names = config.dataset_names
         expected = [f"airt_{cat}" for cat in ALL_HARM_CATEGORIES]
         for name in expected:
@@ -189,7 +245,8 @@ class TestRapidResponseBasic:
             "pyrit.scenario.core.scenario.Scenario._get_default_objective_scorer", return_value=mock_objective_scorer
         ):
             config = RapidResponse()._default_dataset_config
-        assert all(child.max_dataset_size == 4 for child in config._configurations)
+        assert config.max_per_dataset == 4
+        assert config.max_total == "all"
 
     @patch("pyrit.scenario.core.scenario.Scenario._get_default_objective_scorer")
     def test_initialization_minimal(self, mock_get_scorer, mock_objective_scorer):
@@ -205,12 +262,12 @@ class TestRapidResponseBasic:
 
     @patch("pyrit.scenario.core.scenario.Scenario._get_default_objective_scorer")
     @patch.object(
-        CompoundDatasetAttackConfiguration,
+        DatasetAttackConfiguration,
         "get_attack_groups_by_dataset_async",
         new_callable=AsyncMock,
         return_value=ALL_HARM_SEED_GROUPS,
     )
-    async def test_initialization_defaults_to_default_technique(
+    async def test_initialization_defaults_to_light_technique(
         self,
         _mock_groups,
         mock_get_scorer,
@@ -221,8 +278,11 @@ class TestRapidResponseBasic:
         scenario = RapidResponse()
         scenario.set_params_from_args(args={"objective_target": mock_objective_target})
         await scenario.initialize_async()
-        # DEFAULT expands to PromptSending + ManyShot → 2 composites
-        assert len(scenario._scenario_techniques) == 2
+        # Default is the DEFAULT aggregate (built from light tags); it expands to every light-tagged technique.
+        strat = _technique_class()
+        expected = len(strat.expand({strat.DEFAULT}))
+        assert expected > 2
+        assert len(scenario._scenario_techniques) == expected
 
     async def test_initialize_raises_when_no_datasets(self, mock_objective_target, mock_objective_scorer):
         """Dataset resolution fails from empty memory."""
@@ -232,7 +292,7 @@ class TestRapidResponseBasic:
         # Neutralize the provider fetch so the empty-memory path raises loudly instead of fetching
         # the real default dataset from the provider.
         with patch(
-            "pyrit.scenario.core.dataset_configuration.DatasetConfiguration._fetch_dataset_async",
+            "pyrit.scenario.core.dataset_configuration.DatasetConfiguration.prepare_async",
             new_callable=AsyncMock,
         ):
             scenario.set_params_from_args(args={"objective_target": mock_objective_target})
@@ -241,7 +301,7 @@ class TestRapidResponseBasic:
 
     @patch("pyrit.scenario.core.scenario.Scenario._get_default_objective_scorer")
     @patch.object(
-        CompoundDatasetAttackConfiguration,
+        DatasetAttackConfiguration,
         "get_attack_groups_by_dataset_async",
         new_callable=AsyncMock,
         return_value=ALL_HARM_SEED_GROUPS,
@@ -291,7 +351,7 @@ class TestRapidResponseAttackGeneration:
         """Helper: initialize scenario and return atomic attacks."""
         groups = seed_groups or {"hate": _make_seed_groups("hate")}
         with patch.object(
-            CompoundDatasetAttackConfiguration,
+            DatasetAttackConfiguration,
             "get_attack_groups_by_dataset_async",
             new_callable=AsyncMock,
             return_value=groups,
@@ -306,16 +366,18 @@ class TestRapidResponseAttackGeneration:
             await scenario.initialize_async()
             return scenario._atomic_attacks
 
-    async def test_default_technique_produces_role_play_and_many_shot(
-        self, mock_objective_target, mock_objective_scorer
-    ):
+    async def test_default_technique_is_light(self, mock_objective_target, mock_objective_scorer):
         attacks = await self._init_and_get_attacks(
             mock_objective_target=mock_objective_target,
             mock_objective_scorer=mock_objective_scorer,
         )
         technique_classes = {type(a.attack_technique.attack) for a in attacks}
-        # role_play_movie_script is now a simulated-conversation PromptSendingAttack.
+        # Default is the DEFAULT aggregate (built from light tags): it includes many_shot and the
+        # simulated-conversation techniques (context_compliance, role_play_*), but excludes the slow
+        # TAP attack. context_compliance and role_play_* are now simulated-conversation
+        # PromptSendingAttacks, so assert on the simulated-conversation seed rather than a dedicated class.
         assert ManyShotJailbreakAttack in technique_classes
+        assert TreeOfAttacksWithPruningAttack not in technique_classes
         assert any(
             a.attack_technique.seed_technique is not None
             and a.attack_technique.seed_technique.has_simulated_conversation
@@ -406,7 +468,7 @@ class TestRapidResponseAttackGeneration:
         groups = {"hate": _make_seed_groups("hate")}
         with (
             patch.object(
-                CompoundDatasetAttackConfiguration,
+                DatasetAttackConfiguration,
                 "get_attack_groups_by_dataset_async",
                 new_callable=AsyncMock,
                 return_value=groups,
@@ -432,7 +494,7 @@ class TestRapidResponseAttackGeneration:
             assert len(extra) == 1
 
     async def test_attack_count_is_techniques_times_datasets(self, mock_objective_target, mock_objective_scorer):
-        """With 2 datasets and DEFAULT (2 techniques), expect 4 atomic attacks."""
+        """With 2 datasets and the DEFAULT (light) default, expect (light techniques) x 2 atomic attacks."""
         two_datasets = {
             "hate": _make_seed_groups("hate"),
             "violence": _make_seed_groups("violence"),
@@ -442,8 +504,9 @@ class TestRapidResponseAttackGeneration:
             mock_objective_scorer=mock_objective_scorer,
             seed_groups=two_datasets,
         )
-        # DEFAULT = RolePlay + ManyShot = 2 techniques, 2 datasets → 4
-        assert len(attacks) == 4
+        strat = _technique_class()
+        expected = len(strat.expand({strat.DEFAULT})) * 2
+        assert len(attacks) == expected
 
     async def test_atomic_attack_names_are_unique_compound_keys(self, mock_objective_target, mock_objective_scorer):
         """Each AtomicAttack has a unique compound atomic_attack_name for resume correctness."""
@@ -504,7 +567,7 @@ class TestRapidResponseAttackGeneration:
         )
 
         with patch.object(
-            CompoundDatasetAttackConfiguration,
+            DatasetAttackConfiguration,
             "get_attack_groups_by_dataset_async",
             new_callable=AsyncMock,
             return_value=groups,
@@ -601,6 +664,7 @@ class TestRegistryIntegration:
 
     def test_register_preserves_custom_preregistered(self):
         """Pre-registered custom techniques are not overwritten by re-registration."""
+        AttackTechniqueRegistry.reset_registry_singleton()
         registry = AttackTechniqueRegistry.get_registry_singleton()
         custom_factory = AttackTechniqueFactory(name="role_play_movie_script", attack_class=PromptSendingAttack)
         registry.register_technique(name="role_play_movie_script", factory=custom_factory, tags=["custom"])

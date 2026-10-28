@@ -5,23 +5,67 @@
 Tests for the shared registry constructor-argument resolution primitive.
 """
 
-from typing import Literal
+from collections.abc import Callable
+from enum import Enum
+from typing import Any, Literal
 
 import pytest
 
-from pyrit.common import REQUIRED_VALUE
+from pyrit.common import REQUIRED_VALUE, forward_init_parameters
 from pyrit.common.apply_defaults import _RequiredValueSentinel
-from pyrit.models import Message, MessagePiece
+from pyrit.models import Message, MessagePiece, SeedPrompt
 from pyrit.models.identifiers import ConverterIdentifier, TargetIdentifier
-from pyrit.models.parameter import ComponentType
+from pyrit.models.parameter import ComponentType, Parameter
 from pyrit.prompt_target import PromptTarget
 from pyrit.registry.components import ConverterRegistry, ScorerRegistry, TargetRegistry
 from pyrit.registry.resolution import (
     _registry_getter_for_component_type,
     derive_parameters,
     display_choices,
+    reject_non_external_params,
     resolve_constructor_args,
+    resolve_declared_params,
+    validate_declared_params,
 )
+
+
+@pytest.mark.parametrize(
+    ("annotation", "raw", "expected"),
+    [
+        (str, "name", "name"),
+        (int, "7", 7),
+        (bool, "false", False),
+        (list[str], [], []),
+        (list[int], ["1", "2"], [1, 2]),
+    ],
+)
+def test_declared_required_values_resolve(annotation: Any, raw: Any, expected: Any) -> None:
+    declared = [Parameter(name="value", description="Required input", param_type=annotation, default=REQUIRED_VALUE)]
+    result = resolve_declared_params(declared=declared, raw_args={"value": raw}, owner="Test")
+    assert result == {"value": expected}
+    validate_declared_params(declared=declared, params=result, owner="Test")
+
+
+@pytest.mark.parametrize("raw_args", [{}, {"value": None}, {"value": REQUIRED_VALUE}])
+def test_declared_required_values_reject_missing_input(raw_args: dict[str, Any]) -> None:
+    declared = [Parameter(name="value", description="Required input", param_type=str, default=REQUIRED_VALUE)]
+    with pytest.raises(ValueError, match="required.*value"):
+        resolve_declared_params(declared=declared, raw_args=raw_args, owner="Test")
+
+
+def test_declared_required_values_can_be_deferred_for_metadata() -> None:
+    declared = [Parameter(name="value", description="Required input", param_type=int, default=REQUIRED_VALUE)]
+    result = resolve_declared_params(declared=declared, raw_args={}, owner="Test", allow_missing_required=True)
+    assert result == {"value": None}
+    with pytest.raises(ValueError, match="required.*value"):
+        validate_declared_params(declared=declared, params=result, owner="Test")
+
+
+def test_declared_optional_none_is_not_a_required_sentinel() -> None:
+    declared = [Parameter(name="value", description="Optional input", param_type=int)]
+    result = resolve_declared_params(declared=declared, raw_args={}, owner="Test")
+    assert result == {"value": None}
+    validate_declared_params(declared=declared, params=result, owner="Test")
 
 
 class MockPromptTarget(PromptTarget):
@@ -58,6 +102,28 @@ class _SimpleOnly:
         self.mode = mode
 
 
+class _Speed(Enum):
+    FAST = "fast"
+    SLOW = "slow"
+
+
+class _EnumOnly:
+    """Helper whose constructor takes an enum parameter."""
+
+    def __init__(self, *, speed: _Speed) -> None:
+        self.speed = speed
+
+
+class _EnumList:
+    def __init__(self, *, speeds: list[_Speed] | None) -> None:
+        self.speeds = speeds
+
+
+class _RequiredEnumList:
+    def __init__(self, *, speeds: list[_Speed]) -> None:
+        self.speeds = speeds
+
+
 class _Plain:
     def __init__(
         self, *, count: int, ratio: float = 0.5, mode: Literal["a", "b"] = "a", note: str | None = None
@@ -86,11 +152,73 @@ class _VarArgs:
         self.name = name
 
 
+class _ForwardedParent:
+    def __init__(self, *, count: int = 1, speed: _Speed = _Speed.FAST) -> None:
+        self.count = count
+        self.speed = speed
+
+
+class _ForwardingChild(_ForwardedParent):
+    @forward_init_parameters
+    def __init__(self, *, label: str = "child", **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.label = label
+
+
+class _OpaqueParent:
+    def __init__(self, *, count: int = 1) -> None:
+        self.count = count
+
+
+class _OpenBagChild(_OpaqueParent):
+    def __init__(self, *, label: str = "child", **options: object) -> None:
+        super().__init__()
+        self.label = label
+        self.options = options
+
+
 class _StrTargetArg:
     """A constructor arg named like the identifier reference but annotated as a plain type."""
 
     def __init__(self, *, converter_target: str = "x") -> None:
         self.converter_target = converter_target
+
+
+class _OptionalTarget:
+    """Helper whose constructor takes an optional registry-reference target."""
+
+    def __init__(self, *, converter_target: PromptTarget | None = None) -> None:
+        self.converter_target = converter_target
+
+
+class _SeamBase:
+    """Helper base declaring an optional reference that it only tolerates."""
+
+    def __init__(self, *, count: int = 1, converter_target: PromptTarget | None = None) -> None:
+        self.count = count
+        self.converter_target = converter_target
+
+
+class _SeamChild(_SeamBase):
+    """Helper inheriting the seam reference without declaring its own."""
+
+
+class _SeamRequiredBase:
+    """Helper base whose reference is required, so subclasses inherit a real input."""
+
+    def __init__(self, *, converter_target: PromptTarget = REQUIRED_VALUE) -> None:  # type: ignore[assignment]
+        self.converter_target = converter_target
+
+
+class _SeamRequiredChild(_SeamRequiredBase):
+    """Helper inheriting a required reference from its base."""
+
+
+class _SeamRedeclaringChild(_SeamBase):
+    """Helper that re-declares its own optional reference."""
+
+    def __init__(self, *, converter_target: PromptTarget | None = None) -> None:
+        super().__init__(converter_target=converter_target)
 
 
 class _NeedsTargets:
@@ -100,9 +228,42 @@ class _NeedsTargets:
         self.targets = targets
 
 
+def test_strict_rest_resolution_is_opt_in_and_does_not_materialize_required_inputs() -> None:
+    assert resolve_constructor_args(cls=_Plain, raw_args={}, strict_json=True) == {}
+    assert resolve_constructor_args(cls=_Plain, raw_args={"count": "2"}) == {"count": 2}
+    with pytest.raises(ValueError):
+        resolve_constructor_args(cls=_Plain, raw_args={"count": "2"}, strict_json=True)
+    assert resolve_constructor_args(cls=_EnumOnly, raw_args={"speed": "FAST"}, strict_json=True) == {
+        "speed": _Speed.FAST
+    }
+
+
+@pytest.mark.usefixtures("patch_central_database")
+def test_strict_rest_reference_resolution_preserves_registered_identity(target_registry: TargetRegistry) -> None:
+    target = target_registry.instances.get("my_target")
+    args = {"converter_target": "my_target", "offset": 0}
+    resolved = resolve_constructor_args(
+        cls=_NeedsTarget, raw_args=args, identifier_type=ConverterIdentifier, strict_json=True
+    )
+    assert resolved["converter_target"] is target
+    with pytest.raises(ValueError):
+        resolve_constructor_args(
+            cls=_NeedsTarget,
+            raw_args={"converter_target": target},
+            identifier_type=ConverterIdentifier,
+            strict_json=True,
+        )
+    assert (
+        resolve_constructor_args(
+            cls=_NeedsTarget, raw_args={"converter_target": target}, identifier_type=ConverterIdentifier
+        )["converter_target"]
+        is target
+    )
+
+
 def _resolve(cls: type, raw_args: dict[str, object], *, identifier_type: type | None = None) -> dict[str, object]:
     """Resolve ``raw_args`` against the derived parameter contract for ``cls``."""
-    return resolve_constructor_args(cls=cls, raw_args=raw_args, identifier_type=identifier_type)
+    return dict[str, object](resolve_constructor_args(cls=cls, raw_args=raw_args, identifier_type=identifier_type))
 
 
 @pytest.fixture
@@ -137,6 +298,30 @@ class TestDisplayChoices:
         assert display_choices(int) is None
 
 
+class TestSeamParameters:
+    """The derived contract excludes a base's non-required reference seams."""
+
+    def test_optional_base_reference_seam_is_excluded(self) -> None:
+        parameters = derive_parameters(cls=_SeamChild, identifier_type=ConverterIdentifier, seam_base_type=_SeamBase)
+        assert [p.name for p in parameters] == ["count"]
+
+    def test_seam_is_kept_without_the_seam_base(self) -> None:
+        parameters = derive_parameters(cls=_SeamChild, identifier_type=ConverterIdentifier)
+        assert "converter_target" in {p.name for p in parameters}
+
+    def test_required_base_reference_is_kept(self) -> None:
+        parameters = derive_parameters(
+            cls=_SeamRequiredChild, identifier_type=ConverterIdentifier, seam_base_type=_SeamRequiredBase
+        )
+        assert "converter_target" in {p.name for p in parameters}
+
+    def test_redeclared_optional_reference_is_kept(self) -> None:
+        parameters = derive_parameters(
+            cls=_SeamRedeclaringChild, identifier_type=ConverterIdentifier, seam_base_type=_SeamBase
+        )
+        assert "converter_target" in {p.name for p in parameters}
+
+
 @pytest.mark.usefixtures("patch_central_database")
 class TestResolveConstructorArgs:
     """Tests for the end-to-end resolve_constructor_args over a derived contract."""
@@ -152,6 +337,48 @@ class TestResolveConstructorArgs:
     def test_literal_invalid_raises(self) -> None:
         with pytest.raises(ValueError, match="mode"):
             _resolve(_SimpleOnly, {"mode": "z"})
+
+    def test_enum_string_coerces_to_member(self) -> None:
+        resolved = _resolve(_EnumOnly, {"speed": "fast"})
+        assert resolved == {"speed": _Speed.FAST}
+
+    @pytest.mark.parametrize("external_input", [False, True])
+    @pytest.mark.parametrize(
+        ("speeds", "expected"),
+        [
+            (["fast", "slow", "fast"], [_Speed.FAST, _Speed.SLOW, _Speed.FAST]),
+            ([_Speed.SLOW], [_Speed.SLOW]),
+            ([], []),
+            (None, None),
+        ],
+    )
+    def test_enum_lists_coerce_without_changing_supplied_values(
+        self, *, external_input: bool, speeds: Any, expected: Any
+    ) -> None:
+        original = speeds.copy() if isinstance(speeds, list) else speeds
+        resolved = resolve_constructor_args(cls=_EnumList, raw_args={"speeds": speeds}, external_input=external_input)
+        assert resolved == {"speeds": expected}
+        assert speeds == original
+
+    def test_enum_list_invalid_member_raises(self) -> None:
+        with pytest.raises(ValueError, match="Parameter 'speeds' of '_EnumList'"):
+            _resolve(_EnumList, {"speeds": ["fast", "missing"]})
+
+    @pytest.mark.parametrize("external_input", [False, True])
+    @pytest.mark.parametrize(
+        ("cls", "name"), [(_EnumOnly, "speed"), (_RequiredEnumList, "speeds"), (_SimpleOnly, "mode")]
+    )
+    def test_nonnullable_choices_reject_null(self, *, external_input: bool, cls: type, name: str) -> None:
+        with pytest.raises(ValueError, match=f"Parameter '{name}' of '{cls.__name__}'"):
+            resolve_constructor_args(cls=cls, raw_args={name: None}, external_input=external_input)
+
+    def test_forwarded_parent_params_are_coerced(self) -> None:
+        resolved = _resolve(_ForwardingChild, {"label": "configured", "count": "3", "speed": "slow"})
+        assert resolved == {"label": "configured", "count": 3, "speed": _Speed.SLOW}
+
+    def test_open_bag_does_not_disable_unknown_param_rejection(self) -> None:
+        with pytest.raises(ValueError, match="Unknown parameter 'count'"):
+            _resolve(_OpenBagChild, {"count": "3"})
 
     def test_unknown_param_raises(self) -> None:
         with pytest.raises(ValueError, match="Unknown parameter 'nope'"):
@@ -209,6 +436,167 @@ class TestResolveConstructorArgs:
         with pytest.raises(ValueError, match="is empty"):
             _resolve(_NeedsTarget, {"converter_target": "missing"}, identifier_type=ConverterIdentifier)
 
+    @pytest.mark.parametrize("external_input", [False, True])
+    def test_empty_reference_value_is_treated_as_unsupplied(self, *, external_input: bool) -> None:
+        # A cleared form field sends ""; it is the "no selection" state, not a
+        # registry name, so it must not be looked up -- the constructor default
+        # (or an apply_defaults-registered default) applies instead.
+        resolved = resolve_constructor_args(
+            cls=_OptionalTarget,
+            raw_args={"converter_target": ""},
+            identifier_type=ConverterIdentifier,
+            external_input=external_input,
+        )
+        assert resolved == {}
+
+    def test_empty_reference_value_is_not_looked_up(self, target_registry: TargetRegistry) -> None:
+        # Even with a populated registry, "" never resolves to some instance.
+        resolved = _resolve(_NeedsTarget, {"converter_target": "", "offset": "5"}, identifier_type=ConverterIdentifier)
+        assert resolved == {"offset": 5}
+
+
+class _Handle:
+    """A Python object no external caller can supply."""
+
+
+class _Mixed:
+    """Helper whose constructor mixes external inputs with Python-object parameters."""
+
+    def __init__(
+        self,
+        *,
+        count: int = 1,
+        words: list[str] | None = None,
+        key: str | Callable[[], str] | None = None,
+        handle: _Handle | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> None:
+        self.count = count
+        self.words = words
+        self.key = key
+        self.handle = handle
+        self.options = options
+
+
+@pytest.mark.usefixtures("patch_central_database")
+class TestExternalInput:
+    """The external path accepts only supported inputs; the in-process path is unchanged."""
+
+    def test_external_accepts_supported_inputs(self) -> None:
+        raw_args: dict[str, object] = {"count": "3", "words": ["a", "b"], "key": "secret"}
+
+        resolved = resolve_constructor_args(cls=_Mixed, raw_args=raw_args, external_input=True)
+
+        assert resolved == {"count": 3, "words": ["a", "b"], "key": "secret"}
+
+    @pytest.mark.parametrize("raw_args", [{"handle": {}}, {"handle": None}, {"options": {"a": 1}}])
+    def test_external_rejects_parameters_that_take_python_objects(self, raw_args: dict[str, object]) -> None:
+        with pytest.raises(ValueError, match="cannot be set through the API"):
+            resolve_constructor_args(cls=_Mixed, raw_args=raw_args, external_input=True)
+
+    def test_external_still_rejects_unknown_parameters(self) -> None:
+        with pytest.raises(ValueError, match="Unknown parameter 'nope'"):
+            resolve_constructor_args(cls=_Mixed, raw_args={"nope": 1}, external_input=True)
+
+    def test_in_process_callers_keep_passing_python_objects(self) -> None:
+        handle = _Handle()
+        options = {"dtype": object()}
+
+        resolved = _resolve(_Mixed, {"handle": handle, "options": options, "key": print})
+
+        assert resolved["handle"] is handle
+        assert resolved["options"] is options
+        assert resolved["key"] is print
+
+    def test_external_values_of_supported_parameters_reach_the_constructor(self) -> None:
+        assert resolve_constructor_args(cls=_Mixed, raw_args={"words": "a, b"}, external_input=True) == {
+            "words": "a, b"
+        }
+
+    @pytest.mark.parametrize("value", [{"name": "my_target"}, 5, True])
+    def test_external_reference_must_be_a_name(self, target_registry: TargetRegistry, value: object) -> None:
+        with pytest.raises(ValueError, match="expected a registry name"):
+            resolve_constructor_args(
+                cls=_NeedsTarget,
+                raw_args={"converter_target": value},
+                identifier_type=ConverterIdentifier,
+                external_input=True,
+            )
+
+    def test_external_list_reference_must_be_names(self, target_registry: TargetRegistry) -> None:
+        with pytest.raises(ValueError, match="expected a registry name"):
+            resolve_constructor_args(
+                cls=_NeedsTargets,
+                raw_args={"targets": ["my_target", {"name": "x"}]},
+                identifier_type=TargetIdentifier,
+                external_input=True,
+            )
+
+        resolved = resolve_constructor_args(
+            cls=_NeedsTargets,
+            raw_args={"targets": ["my_target"]},
+            identifier_type=TargetIdentifier,
+            external_input=True,
+        )
+        assert resolved["targets"] == [target_registry.instances.get("my_target")]
+
+    def test_external_reference_resolves_name(self, target_registry: TargetRegistry) -> None:
+        resolved = resolve_constructor_args(
+            cls=_NeedsTarget,
+            raw_args={"converter_target": "my_target"},
+            identifier_type=ConverterIdentifier,
+            external_input=True,
+        )
+
+        assert resolved["converter_target"] is target_registry.instances.get("my_target")
+
+    def test_reject_non_external_params_checks_names_and_references(self) -> None:
+        declared = derive_parameters(cls=_Mixed)
+        reference = derive_parameters(cls=_NeedsTarget, identifier_type=ConverterIdentifier)
+
+        reject_non_external_params(params={"count": 1, "key": "k"}, declared=declared, owner="demo")
+        with pytest.raises(ValueError, match="'handle' of 'demo' cannot be set through the API"):
+            reject_non_external_params(params={"handle": None}, declared=declared, owner="demo")
+        with pytest.raises(ValueError, match="Unknown parameter 'unknown' for 'demo'"):
+            reject_non_external_params(params={"unknown": None}, declared=declared, owner="demo")
+        with pytest.raises(ValueError, match="demo.converter_target: expected a registry name"):
+            reject_non_external_params(params={"converter_target": {"name": "x"}}, declared=reference, owner="demo")
+
+    @pytest.mark.parametrize(
+        ("registry_type", "identifier_type", "type_name", "raw_args"),
+        [
+            (TargetRegistry, TargetIdentifier, "TextTarget", {"custom_configuration": {}}),
+            (TargetRegistry, TargetIdentifier, "OpenAIChatTarget", {"httpx_client_kwargs": {"timeout": 5}}),
+            (ConverterRegistry, ConverterIdentifier, "TextJailbreakConverter", {"jailbreak_template": "x"}),
+            (ConverterRegistry, ConverterIdentifier, "PDFConverter", {"font_color": [1, 2, 3]}),
+        ],
+    )
+    def test_registered_components_reject_object_parameters_from_external_input(
+        self, registry_type: type, identifier_type: type, type_name: str, raw_args: dict[str, object]
+    ) -> None:
+        cls = registry_type.get_registry_singleton().get_class(type_name)
+
+        with pytest.raises(ValueError, match="cannot be set through the API"):
+            resolve_constructor_args(cls=cls, raw_args=raw_args, identifier_type=identifier_type, external_input=True)
+
+    @pytest.mark.parametrize(
+        ("registry_type", "identifier_type", "type_name", "raw_args"),
+        [
+            (TargetRegistry, TargetIdentifier, "OpenAIChatTarget", {"api_key": "key", "temperature": 0.5}),
+            (ConverterRegistry, ConverterIdentifier, "SearchReplaceConverter", {"pattern": "a", "replace": "b"}),
+        ],
+    )
+    def test_registered_components_accept_string_inputs_from_external_input(
+        self, registry_type: type, identifier_type: type, type_name: str, raw_args: dict[str, object]
+    ) -> None:
+        cls = registry_type.get_registry_singleton().get_class(type_name)
+
+        resolved = resolve_constructor_args(
+            cls=cls, raw_args=raw_args, identifier_type=identifier_type, external_input=True
+        )
+
+        assert resolved == raw_args
+
 
 class TestDeriveParameters:
     """Tests for deriving the Parameter contract from a constructor signature."""
@@ -219,13 +607,66 @@ class TestDeriveParameters:
         assert params["ratio"].default == 0.5
         assert params["count"].param_type is int
 
-    def test_optional_unwrapped(self) -> None:
+    def test_optional_annotation_preserved(self) -> None:
         params = {p.name: p for p in derive_parameters(cls=_Plain)}
-        assert params["note"].param_type is str
+        assert params["note"].param_type == str | None
+        assert params["note"].type_name == "str"
 
     def test_descriptions_parsed(self) -> None:
         params = {p.name: p for p in derive_parameters(cls=_Plain)}
         assert params["count"].description == "A required count."
+
+    def test_seed_prompt_metadata_and_resolution_use_the_existing_parameter_contract(self) -> None:
+        default_prompt = SeedPrompt(value="Default\ninstructions")
+
+        class _PromptInput:
+            def __init__(self, *, prompt: SeedPrompt = default_prompt) -> None:
+                self.prompt = prompt
+
+        parameter = derive_parameters(cls=_PromptInput)[0]
+        assert parameter.multiline
+        assert parameter.for_external_catalog().default == "Default\ninstructions"
+        resolved = resolve_constructor_args(
+            cls=_PromptInput,
+            raw_args={"prompt": "Edited\ninstructions"},
+            external_input=True,
+            strict_json=True,
+        )
+        assert isinstance(resolved["prompt"], SeedPrompt)
+        assert resolved["prompt"].value == "Edited\ninstructions"
+        assert _PromptInput().prompt.value == "Default\ninstructions"
+
+    def test_component_multiline_names_do_not_affect_other_components(self) -> None:
+        class _Multiline(_Plain):
+            MULTILINE_PARAMETER_NAMES = frozenset({"note"})
+
+        params = {p.name: p for p in derive_parameters(cls=_Multiline)}
+        assert params["note"].multiline
+        assert not params["mode"].multiline
+        assert not any(p.multiline for p in derive_parameters(cls=_Plain))
+
+    def test_component_multiline_names_are_inherited(self) -> None:
+        class _Multiline(_Plain):
+            MULTILINE_PARAMETER_NAMES = frozenset({"note"})
+
+        class _Child(_Multiline):
+            pass
+
+        params = {p.name: p for p in derive_parameters(cls=_Child)}
+        assert params["note"].multiline
+
+    def test_component_multiline_names_supplement_identifier_defaults(self) -> None:
+        class _Multiline:
+            MULTILINE_PARAMETER_NAMES = frozenset({"note"})
+
+            def __init__(self, *, http_request: str = "", note: str = "") -> None:
+                self.http_request = http_request
+                self.note = note
+
+        params = {p.name: p for p in derive_parameters(cls=_Multiline, identifier_type=TargetIdentifier)}
+        assert params["http_request"].multiline
+        assert params["note"].multiline
+        assert TargetIdentifier.get_multiline_parameter_names() == frozenset({"http_request"})
 
     def test_order_follows_signature(self) -> None:
         names = [p.name for p in derive_parameters(cls=_Plain)]
@@ -239,6 +680,14 @@ class TestDeriveParameters:
     def test_var_args_skipped(self) -> None:
         names = [p.name for p in derive_parameters(cls=_VarArgs)]
         assert names == ["name"]
+
+    def test_forwarded_parent_parameters_follow_child_in_mro_order(self) -> None:
+        names = [p.name for p in derive_parameters(cls=_ForwardingChild)]
+        assert names == ["label", "count", "speed"]
+
+    def test_unexposed_parent_parameters_are_not_inferred_from_open_bag(self) -> None:
+        names = [p.name for p in derive_parameters(cls=_OpenBagChild)]
+        assert names == ["label"]
 
     def test_identifier_marker_overrides_plain_annotation(self) -> None:
         # The identifier marks ``converter_target`` as a TARGET reference, so even a

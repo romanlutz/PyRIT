@@ -6,14 +6,14 @@ from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel
 
-from pyrit.models import Message
+from pyrit.models import ComponentIdentifier, Identifiable, Message
 
 # Type alias for system message handling strategies
 SystemMessageBehavior = Literal["keep", "squash", "ignore"]
 """
 How to handle system messages in models with varying support:
 - "keep": Keep system messages as-is (default for most models)
-- "squash": Merge system message into first user message
+- "squash": Merge system messages into the following user message
 - "ignore": Drop system messages entirely
 """
 
@@ -38,6 +38,12 @@ class MessageListNormalizer(abc.ABC, Generic[T]):
 
         Returns:
             A list of normalized items of type T.
+
+        Note:
+            Output metadata is authoritative. A normalizer that creates replacement
+            ``Message`` or ``MessagePiece`` objects must preserve any
+            ``prompt_metadata`` required by downstream consumers. The target stamps
+            the active conversation ID but does not merge removed metadata back in.
         """
 
     async def normalize_to_dicts_async(self, messages: list[Message]) -> list[dict[str, Any]]:
@@ -57,7 +63,7 @@ class MessageListNormalizer(abc.ABC, Generic[T]):
         return [item.model_dump(exclude_none=True) for item in normalized]
 
 
-class MessageStringNormalizer(abc.ABC):
+class MessageStringNormalizer(Identifiable, abc.ABC):
     """
     Abstract base class for normalizers that return a string representation.
 
@@ -76,6 +82,18 @@ class MessageStringNormalizer(abc.ABC):
             A string representation of the messages.
         """
 
+    def _build_identifier(self) -> ComponentIdentifier:
+        """
+        Build the formatter's behavioral identifier.
+
+        Stateless custom formatters receive class identity by default. Formatters
+        with behavior-changing configuration should override this method.
+
+        Returns:
+            The formatter's behavioral identifier.
+        """
+        return ComponentIdentifier.of(self)
+
 
 async def apply_system_message_behavior_async(
     messages: list[Message], behavior: SystemMessageBehavior
@@ -90,7 +108,7 @@ async def apply_system_message_behavior_async(
         messages: The list of Message objects to process.
         behavior: How to handle system messages:
             - "keep": Return messages unchanged
-            - "squash": Merge system into first user message
+            - "squash": Merge system messages into the following user message
             - "ignore": Remove system messages
 
     Returns:

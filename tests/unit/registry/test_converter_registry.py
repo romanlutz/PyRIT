@@ -6,12 +6,16 @@ Tests for the merged ``ConverterRegistry`` (buildable catalog + instance contain
 and its introspection helpers.
 """
 
+from pathlib import Path
 from typing import Literal
 
 import pytest
 
 from pyrit.common import REQUIRED_VALUE
+from pyrit.common.apply_defaults import reset_default_values, set_default_value
+from pyrit.common.brick_contract import get_constructor_owners
 from pyrit.converter import (
+    ArabiziConverter,
     Base64Converter,
     CaesarConverter,
     Converter,
@@ -19,6 +23,7 @@ from pyrit.converter import (
     LLMGenericTextConverter,
     NoiseConverter,
     PersuasionConverter,
+    PuzzledConverter,
     TenseConverter,
     ToneConverter,
     TranslationConverter,
@@ -116,6 +121,21 @@ def registry():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("converter_type", "parameter_name"),
+    [("AddImageVideoConverter", "video_path"), ("ImageOverlayConverter", "base_image")],
+)
+@pytest.mark.parametrize(
+    "source",
+    [Path("input.png"), "input.png", "https://account.blob.core.windows.net/container/input.png"],
+)
+def test_registry_preserves_path_or_str_inputs(
+    registry: ConverterRegistry, converter_type: str, parameter_name: str, source: Path | str
+) -> None:
+    instance = registry.create_instance(converter_type, **{parameter_name: source})
+    assert instance.get_identifier().params[parameter_name] == str(source)
+
+
 class TestConverterRegistrySingleton:
     """Tests for the singleton pattern in ConverterRegistry."""
 
@@ -161,15 +181,57 @@ class TestConverterRegistryRegisterInstance:
 
         assert len(registry.instances) == 2
 
-    def test_register_instance_duplicate_name_overwrites(self, registry: ConverterRegistry):
+    def test_register_instance_duplicate_name_raises(self, registry: ConverterRegistry):
         converter1 = MockTextConverter()
         converter2 = MockImageConverter()
 
         registry.instances.register(converter1, name="shared_name")
-        registry.instances.register(converter2, name="shared_name")
 
-        assert len(registry.instances) == 1
-        assert registry.instances.get("shared_name") is converter2
+        with pytest.raises(ValueError, match="already exists"):
+            registry.instances.register(converter2, name="shared_name")
+
+        assert registry.instances.get("shared_name") is converter1
+
+    def test_create_named_instance_builds_and_stores_converter(self, registry: ConverterRegistry):
+        converter = registry.create_named_instance(name="base64", type_name="Base64Converter")
+
+        assert isinstance(converter, Base64Converter)
+        assert registry.instances.get("base64") is converter
+
+    def test_create_named_instance_stores_registry_metadata(self, registry: ConverterRegistry):
+        converter = registry.create_named_instance(
+            name="base64",
+            type_name="Base64Converter",
+            registry_metadata={"owned_artifact_paths": ["managed.dat"]},
+        )
+
+        entry = registry.instances.get_entry("base64")
+        assert entry is not None
+        assert entry.instance is converter
+        assert entry.metadata == {"owned_artifact_paths": ["managed.dat"]}
+
+    def test_create_instance_from_external_input_rejects_object_parameters(self, registry: ConverterRegistry):
+        with pytest.raises(ValueError, match="'jailbreak_template' of 'TextJailbreakConverter' cannot be set"):
+            registry.create_instance_from_external_input(
+                "TextJailbreakConverter", params={"jailbreak_template": {"template": "x"}}
+            )
+
+    def test_create_named_instance_selects_external_input_explicitly(self, registry: ConverterRegistry):
+        with pytest.raises(ValueError, match="cannot be set through the API"):
+            registry.create_named_instance(
+                name="math", type_name="MathObfuscationConverter", params={"rng": None}, external_input=True
+            )
+        assert registry.instances.get("math") is None
+
+        converter = registry.create_named_instance(
+            name="caesar", type_name="CaesarConverter", params={"caesar_offset": "3"}, external_input=True
+        )
+        assert registry.instances.get("caesar") is converter
+
+    @pytest.mark.parametrize("name", ["preview", "types"])
+    def test_create_named_instance_rejects_reserved_name(self, registry: ConverterRegistry, name: str):
+        with pytest.raises(ValueError, match="reserved"):
+            registry.create_named_instance(name=name, type_name="Base64Converter")
 
     def test_register_instance_rejects_non_converter(self, registry: ConverterRegistry):
         class NotAConverter:
@@ -259,6 +321,18 @@ class TestDiscovery:
         # concern) but must remain discoverable/buildable so agents can use it.
         assert "SelectiveTextConverter" in registry.get_class_names()
 
+    def test_discovers_prompt_template_converter(self, registry: ConverterRegistry):
+        assert "PromptTemplateConverter" in registry.get_class_names()
+
+    async def test_builds_deprecated_task_framing_converter_by_name(self, registry: ConverterRegistry):
+        # Deprecated until 1.4.0, but existing callers must still be able to build it by name.
+        with pytest.warns(
+            DeprecationWarning, match=r"TaskFramingConverter is deprecated and will be removed in 1\.4\.0"
+        ):
+            converter = registry.create_instance("TaskFramingConverter", task_template="Example {{ prompt }}")
+        result = await converter.convert_async(prompt="x")
+        assert result.output_text == "Example x"
+
     def test_does_not_register_base_class(self, registry: ConverterRegistry):
         assert "Converter" not in registry.get_class_names()
 
@@ -305,6 +379,23 @@ class TestCreateInstance:
         registry.create_instance("Base64Converter")
         assert len(registry.instances) == 0
 
+    def test_builds_a_seam_converter_without_a_target(self, registry: ConverterRegistry):
+        # The base Converter seam is not part of the contract, so no target is needed.
+        assert isinstance(registry.create_instance("ArabiziConverter"), ArabiziConverter)
+
+    def test_seam_converter_rejects_an_unknown_target(self, registry: ConverterRegistry):
+        # A stale caller sending a cleared target gets a clear unknown-parameter
+        # error instead of a registry lookup of the empty name.
+        with pytest.raises(ValueError, match="Unknown parameter 'converter_target'"):
+            registry.create_instance("ArabiziConverter", converter_target="")
+
+    def test_cleared_optional_target_builds_without_one(self, registry: ConverterRegistry):
+        # A cleared selection arrives as "": it is unsupplied, so a converter whose
+        # own contract makes the target optional builds without one.
+        converter = registry.create_instance_from_external_input("PuzzledConverter", params={"converter_target": ""})
+        assert isinstance(converter, PuzzledConverter)
+        assert converter._converter_target is None
+
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestCreateLLMConverter:
@@ -329,6 +420,29 @@ class TestCreateLLMConverter:
         finally:
             TargetRegistry.reset_registry_singleton()
 
+    def test_cleared_required_target_reports_the_missing_target(self, registry: ConverterRegistry):
+        # "" from a cleared selection is unsupplied; the then-missing required
+        # target surfaces the constructor's own message instead of a registry
+        # lookup of the empty name.
+        reset_default_values()
+        with pytest.raises(ValueError, match="converter_target is required for TranslationConverter"):
+            registry.create_instance_from_external_input(
+                "TranslationConverter", params={"converter_target": "", "language": "French"}
+            )
+
+    def test_cleared_target_uses_a_registered_default(self, registry: ConverterRegistry):
+        # With a target default registered (the adversarial-target feature), a
+        # cleared selection falls back to it exactly like an omitted parameter.
+        target = MockPromptTarget()
+        set_default_value(class_type=TranslationConverter, parameter_name="converter_target", value=target)
+        try:
+            converter = registry.create_instance_from_external_input(
+                "TranslationConverter", params={"converter_target": "", "language": "French"}
+            )
+            assert converter._converter_target is target
+        finally:
+            reset_default_values()
+
 
 class TestClassMetadata:
     """Tests for converter class-catalog metadata building."""
@@ -351,6 +465,16 @@ class TestClassMetadata:
     def test_metadata_has_no_catalog_visible_field(self, registry: ConverterRegistry):
         # catalog_visible is a presentation concern owned by the backend/frontend.
         assert not hasattr(self._metadata_for(registry, "Base64Converter"), "catalog_visible")
+
+    def test_multiline_parameters_come_from_converter(self, registry: ConverterRegistry) -> None:
+        meta = self._metadata_for(registry, "RolePlayToolCallConverter")
+        assert {p.name for p in meta.parameters if p.multiline} == {
+            "valid_call",
+            "action_desired",
+            "message_format",
+            "system_prompt",
+        }
+        assert all(p.model_dump()["multiline"] for p in meta.parameters if p.multiline)
 
     def test_is_llm_based_flag(self, registry: ConverterRegistry):
         llm_based = (
@@ -384,6 +508,45 @@ class TestClassMetadata:
         assert references, "expected at least one reference parameter (the LLM target)"
         assert any(p.is_reference_to(ComponentType.TARGET) for p in meta.parameters)
 
+    def test_base_seam_target_is_not_advertised(self, registry: ConverterRegistry):
+        # These converters inherit Converter.__init__'s tolerated converter_target
+        # without declaring it; advertising it (and the LLM badge projected from it)
+        # was the confusing part of the issue.
+        seam_only = (
+            "ArabicPresentationFormConverter",
+            "ArabiziConverter",
+            "BrailleConverter",
+            "CharacterSpaceConverter",
+            "FlipConverter",
+            "JsonStringConverter",
+            "UrlConverter",
+            "ZeroWidthConverter",
+        )
+        for name in seam_only:
+            meta = self._metadata_for(registry, name)
+            assert "converter_target" not in {p.name for p in meta.parameters}, (
+                f"{name} advertises a target it does not take"
+            )
+            assert meta.is_llm_based is False, f"{name} must not carry the LLM badge"
+
+    def test_class_declared_targets_stay_advertised(self, registry: ConverterRegistry):
+        translation = self._metadata_for(registry, "TranslationConverter")
+        translation_target = next(p for p in translation.parameters if p.name == "converter_target")
+        assert translation_target.required is True
+        assert translation.is_llm_based is True
+
+        puzzled = self._metadata_for(registry, "PuzzledConverter")
+        puzzled_target = next(p for p in puzzled.parameters if p.name == "converter_target")
+        assert puzzled_target.required is False
+
+    def test_advertised_targets_are_declared_by_the_class(self, registry: ConverterRegistry):
+        # The advertised contract may only claim a target input when the class (or
+        # an intermediate) declares converter_target itself, never via the base seam.
+        for meta in registry.get_all_registered_class_metadata():
+            if any(p.is_reference_to(ComponentType.TARGET) for p in meta.parameters):
+                cls = registry.get_class(meta.class_name)
+                assert get_constructor_owners(cls)[0] is not Converter, meta.class_name
+
 
 # ---------------------------------------------------------------------------
 # Introspection helpers
@@ -408,12 +571,14 @@ class _OptionalLiteralConverter:
 class TestDeriveParameters:
     """Tests for the converter-parameter derivation into the ``Parameter`` contract."""
 
-    def test_unwraps_optional_into_param_type(self) -> None:
+    def test_preserves_optional_annotation_and_scalar_display(self) -> None:
         from pyrit.models.identifiers import ConverterIdentifier
 
         params = derive_parameters(cls=_UnionTargetConverter, identifier_type=ConverterIdentifier)
         offset_param = next(p for p in params if p.name == "offset")
-        assert offset_param.param_type is int
+        assert offset_param.param_type == int | None
+        assert offset_param.type_name == "int"
+        assert offset_param.coerce_value(None) is None
         assert offset_param.reference is None
         assert offset_param.is_string_coercible is True
 
@@ -469,7 +634,7 @@ class TestRegistrationGate:
 
         for name in registry.get_class_names():
             cls = registry.get_class(name)
-            parameters = derive_parameters(cls=cls, identifier_type=ConverterIdentifier)
+            parameters = derive_parameters(cls=cls, identifier_type=ConverterIdentifier, seam_base_type=Converter)
             # Reference params only ever carry a component type the resolver can map.
             for param in parameters:
                 if param.reference is not None:
@@ -483,7 +648,11 @@ class TestRegistrationGate:
         from pyrit.models.identifiers import ConverterIdentifier
 
         for meta in registry.get_all_registered_class_metadata():
-            parameters = derive_parameters(cls=registry.get_class(meta.class_name), identifier_type=ConverterIdentifier)
+            parameters = derive_parameters(
+                cls=registry.get_class(meta.class_name),
+                identifier_type=ConverterIdentifier,
+                seam_base_type=Converter,
+            )
             has_target = any(p.is_reference_to(ComponentType.TARGET) for p in parameters)
             assert meta.is_llm_based is has_target, f"is_llm_based mismatch for {meta.class_name}"
 

@@ -2,8 +2,10 @@
 # Licensed under the MIT license.
 import base64
 import logging
+from pathlib import Path
 from typing import Any, Literal
 
+from pyrit.common import forward_init_parameters, get_mime_type
 from pyrit.exceptions import (
     EmptyResponseException,
     pyrit_target_retry,
@@ -41,6 +43,7 @@ class OpenAIImageTarget(OpenAITarget):
         )
     )
 
+    @forward_init_parameters
     def __init__(
         self,
         *,
@@ -87,9 +90,9 @@ class OpenAIImageTarget(OpenAITarget):
             custom_configuration (TargetConfiguration, Optional): Override the default configuration for
                 this target instance. Defaults to None.
             **kwargs: Additional keyword arguments to be passed to AzureOpenAITarget.
-            httpx_client_kwargs (dict, Optional): Additional kwargs to be passed to the
-                `httpx.AsyncClient()` constructor.
-                For example, to specify a 3 minutes timeout: httpx_client_kwargs={"timeout": 180}
+            httpx_client_kwargs (dict, Optional): Additional ``AsyncOpenAI`` constructor options.
+                For example, ``{"timeout": 180}`` sets a three-minute timeout. Custom ``http_client``
+                instances use HTTPX on SDK 2, or HTTPX2 / legacy HTTPX on SDK 3.
 
         Raises:
             ValueError: If background is "transparent" and output_format is "jpeg",
@@ -134,13 +137,14 @@ class OpenAIImageTarget(OpenAITarget):
         return self._create_identifier(
             params={
                 "image_size": self.image_size,
+                "output_format": self.output_format,
                 "quality": self.quality,
                 "background": self.background,
             },
         )
 
-    @limit_requests_per_minute
     @pyrit_target_retry
+    @limit_requests_per_minute
     async def _send_prompt_to_target_async(
         self,
         *,
@@ -229,9 +233,11 @@ class OpenAIImageTarget(OpenAITarget):
                 category="prompt-memory-entries", value=image_path, data_type="image_path"
             )
 
-            image_name = str(await img_serializer.get_data_filename_async())
+            # Upload the image under its own file name. get_data_filename_async() would generate a new
+            # local storage path (always .png), not the name of the image being edited.
+            image_name = Path(image_path).name
             image_bytes = await img_serializer.read_data_async()
-            image_type = img_serializer.get_mime_type(image_path)
+            image_type = get_mime_type(image_path)
 
             image_files.append((image_name, image_bytes, image_type))
 

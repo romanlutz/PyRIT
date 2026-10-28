@@ -11,9 +11,19 @@ Extends SeedGroup to enforce that all seeds have is_general_technique=True.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Literal, Self
+
+from pydantic import Field
+
 from pyrit.models.seeds.seed_group import SeedGroup
 from pyrit.models.seeds.seed_objective import SeedObjective
 from pyrit.models.seeds.seed_prompt import SeedPrompt
+from pyrit.models.seeds.seed_simulated_conversation import SeedSimulatedConversation
+from pyrit.models.technique_edit import SimulationSettings
+
+if TYPE_CHECKING:
+    from pyrit.models.messages.message import Message
+    from pyrit.models.technique_edit import SimulationChanges
 
 
 class AttackTechniqueSeedGroup(SeedGroup):
@@ -31,8 +41,17 @@ class AttackTechniqueSeedGroup(SeedGroup):
     # ``None`` (default) appends at the end; an integer inserts before that position.
     insertion_index: int | None = None
 
+    prompt_placement: Literal["preserve", "prepend"] = Field(
+        default="preserve",
+        description=(
+            '"preserve" combines existing sequence relationships. During AttackSeedGroup construction, '
+            "prompts at the same sequence are grouped when roles are the same and rejected when roles conflict. "
+            '"prepend" places technique prompts before base prompts.'
+        ),
+    )
+
     @classmethod
-    def from_system_prompt(cls, system_prompt: str, *, insertion_index: int | None = None) -> AttackTechniqueSeedGroup:
+    def from_system_prompt(cls, system_prompt: str, *, insertion_index: int | None = None) -> Self:
         """
         Build a technique group carrying a single system-role instruction.
 
@@ -40,6 +59,10 @@ class AttackTechniqueSeedGroup(SeedGroup):
         payload is a system prompt that should be prepended to every objective. The
         value is wrapped verbatim (``is_jinja_template=False``), so any literal
         ``{{ ... }}`` in ``system_prompt`` is preserved rather than re-rendered.
+
+        The group declares ``prompt_placement="prepend"`` so ``AttackSeedGroup.with_technique``
+        places the system framing before the base prompts without relying on a reserved sequence
+        value.
 
         Args:
             system_prompt (str): The system-role instruction text.
@@ -52,6 +75,47 @@ class AttackTechniqueSeedGroup(SeedGroup):
         return cls(
             seeds=[SeedPrompt(value=system_prompt, data_type="text", role="system", is_general_technique=True)],
             insertion_index=insertion_index,
+            prompt_placement="prepend",
+        )
+
+    @classmethod
+    def from_messages(
+        cls,
+        *,
+        messages: list[Message],
+        starting_sequence: int = 0,
+        insertion_index: int | None = None,
+        prompt_placement: Literal["preserve", "prepend"] = "prepend",
+    ) -> Self:
+        """
+        Build a technique group from conversation messages.
+
+        This supports techniques that generate reusable teaching or priming
+        messages programmatically before a generic attack sends each objective.
+
+        Args:
+            messages (list[Message]): Conversation messages to convert into technique seeds.
+            starting_sequence (int): Sequence number assigned to the first message.
+                Prompt sequences are usually normalized when the technique is merged into an
+                ``AttackSeedGroup``. If the merged group contains a ``SeedSimulatedConversation``,
+                prompt sequences are preserved, so choose a starting value outside that simulated
+                conversation's sequence range. Defaults to 0.
+            insertion_index (int | None): Where to insert the technique when merging
+                into a ``AttackSeedGroup``. Defaults to None.
+            prompt_placement (Literal["preserve", "prepend"]): How to place prompts
+                when merging into a ``AttackSeedGroup``. Defaults to ``"prepend"``.
+
+        Returns:
+            AttackTechniqueSeedGroup: A group containing general-technique prompts.
+        """
+        seed_prompts = SeedPrompt.from_messages(messages=messages, starting_sequence=starting_sequence)
+        for seed_prompt in seed_prompts:
+            seed_prompt.is_general_technique = True
+
+        return cls(
+            seeds=seed_prompts,
+            insertion_index=insertion_index,
+            prompt_placement=prompt_placement,
         )
 
     def _check_invariants(self) -> None:
@@ -67,6 +131,65 @@ class AttackTechniqueSeedGroup(SeedGroup):
         super()._check_invariants()
         self._enforce_all_general_strategy()
         self._enforce_no_objectives()
+
+    @property
+    def fixed_final_user_prompt(self) -> SeedPrompt | None:
+        """The single user text prompt immediately after a simulation without a generated final turn."""
+        simulation = self.simulated_conversation_config
+        if simulation is None or simulation.next_message_system_prompt is not None:
+            return None
+        candidates = [prompt for prompt in self.prompts if prompt.sequence == simulation.sequence_range.stop]
+        if len(candidates) != 1:
+            return None
+        prompt = candidates[0]
+        return prompt if prompt.role == "user" and prompt.data_type == "text" else None
+
+    @property
+    def simulation_settings(self) -> SimulationSettings | None:
+        """The text simulation snapshot, including the existing final-message mode."""
+        simulation = self.simulated_conversation_config
+        if simulation is None:
+            return None
+        values = simulation.text_settings
+        if values is None:
+            return None
+        final = self.fixed_final_user_prompt
+        return SimulationSettings(**values, final_user_message=final.value if final is not None else None)
+
+    def with_simulation_changes(self, changes: SimulationChanges) -> Self:
+        """
+        Rebuild simulation settings and a fixed final turn without changing the source group.
+
+        Returns:
+            Self: An independent, validated technique seed group.
+
+        Raises:
+            ValueError: If an edit changes the existing final-message mode or overlaps other seeds.
+        """
+        simulation = next((seed for seed in self.seeds if isinstance(seed, SeedSimulatedConversation)), None)
+        if simulation is None:
+            raise ValueError("This technique has no simulated conversation")
+        final = self.fixed_final_user_prompt
+        if "final_user_message" in changes.model_fields_set:
+            if final is None:
+                raise ValueError("This simulation has no editable fixed final user message")
+            if changes.final_user_message is None:
+                raise ValueError("A fixed final user message cannot be cleared")
+        updated = simulation.with_settings(changes)
+        seeds = []
+        for seed in self.seeds:
+            if seed is simulation:
+                seeds.append(updated)
+            elif seed is final:
+                seeds.append(
+                    seed.with_value(
+                        changes.final_user_message if changes.final_user_message is not None else seed.value,
+                        sequence=updated.sequence_range.stop,
+                    )
+                )
+            else:
+                seeds.append(seed.model_copy(deep=True))
+        return type(self).model_validate({**self.model_dump(exclude={"seeds"}), "seeds": seeds})
 
     def _enforce_all_general_strategy(self) -> None:
         """

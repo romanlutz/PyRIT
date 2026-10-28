@@ -14,9 +14,9 @@ All scenarios inherit from `Scenario` (ABC) and must:
 
 1. **Define `VERSION`** as a class constant (increment on breaking changes)
 2. **Optionally declare `BASELINE_ATTACK_POLICY`** (defaults to `BaselineAttackPolicy.Enabled` — a baseline `PromptSendingAttack` is prepended and callers can opt out per run by setting `include_baseline=False` in the run params, see "Run Parameters" below):
-   - `BaselineAttackPolicy.Disabled` — baseline supported but off by default (e.g. `Jailbreak`, where templates dominate the run).
+   - `BaselineAttackPolicy.Disabled` — baseline supported but off by default (e.g. `garak.doctor`, where the harm-probe technique set dominates the run).
    - `BaselineAttackPolicy.Forbidden` — baseline is meaningless for this scenario's comparison axis (e.g. `AdversarialBenchmark`, which compares against gold-standard answers). Supplying `include_baseline=True` raises `ValueError`.
-3. **Pass `technique_class`, `default_technique`, and `default_dataset_config` to `super().__init__()`:**
+3. **Pass `technique_class` and `default_dataset_config` to `super().__init__()`:**
 
 ```python
 class MyScenario(Scenario):
@@ -28,12 +28,15 @@ class MyScenario(Scenario):
         super().__init__(
             version=self.VERSION,
             technique_class=MyTechnique,
-            default_technique=MyTechnique.ALL,
-            default_dataset_config=DatasetConfiguration(dataset_names=["my_dataset"]),
+            default_dataset_config=DatasetAttackConfiguration(sources=[DatasetSource(name="my_dataset")]),
             objective_scorer=objective_scorer or self._get_default_objective_scorer(),
             scenario_result_id=scenario_result_id,
         )
 ```
+
+The default technique (what runs when the caller passes no `scenario_techniques`) is
+**not** a constructor argument — it is owned by the technique catalog and read from
+`technique_class.default()`. See "Default Technique" below.
 
 For scenarios whose technique enum is built dynamically (RapidResponse pattern), build the
 technique class in a module-level `@cache`-decorated function and pass the result through
@@ -65,8 +68,7 @@ def __init__(
     super().__init__(
         version=self.VERSION,
         technique_class=MyTechnique,
-        default_technique=MyTechnique.ALL,
-        default_dataset_config=DatasetConfiguration(dataset_names=["my_dataset"]),
+        default_dataset_config=DatasetAttackConfiguration(sources=[DatasetSource(name="my_dataset")]),
         objective_scorer=objective_scorer,
     )
 ```
@@ -78,7 +80,7 @@ Requirements:
   `pyrit/common/brick_contract.py`). Violators raise `TypeError` at
   import time.
 - **All constructor parameters must be optional** (default to `None`) so the registry can instantiate the scenario with no arguments for metadata introspection. Defer required-input validation to `initialize_async()` or `_build_atomic_attacks_async()`. `ScenarioRegistry._build_metadata` raises `TypeError` if `scenario_class()` cannot be called with no arguments.
-- `super().__init__()` called with `version`, `technique_class`, `default_technique`, `default_dataset_config`, `objective_scorer`
+- `super().__init__()` called with `version`, `technique_class`, `default_dataset_config`, `objective_scorer` (the default technique is owned by the catalog, not passed here — see "Default Technique")
 - complex objects like `adversarial_chat` or `objective_scorer` should be passed into the constructor.
 
 ## Run Parameters
@@ -90,7 +92,12 @@ scenario.set_params_from_args(args={"objective_target": target, "max_concurrency
 await scenario.initialize_async()
 ```
 
-The base `Scenario` declares the common run inputs once in `_common_scenario_parameters()`: `objective_target` (a `RegistryReference` — resolved by name or supplied as an instance), the `opaque` live objects `scenario_techniques` / `technique_converters` / `dataset_config` / `memory_labels` (passed by identity, never coerced or deep-copied), and the scalars `max_concurrency` / `max_retries` / `include_baseline`.
+The base `Scenario` declares the common run inputs once in `_common_scenario_parameters()`: `objective_target` (a `RegistryReference` — resolved by name or supplied as an instance), the `opaque` live objects `scenario_techniques` / `technique_converters` / `dataset_config` / `memory_labels` (passed by identity, never coerced or deep-copied), and the scalars `max_concurrency` / `max_retries` / `include_baseline` / `incompatible_technique_policy`.
+
+`incompatible_technique_policy` accepts `skip` (default) or `raise`; `None` uses
+`INCOMPATIBLE_TECHNIQUE_POLICY`. Forward `context.incompatible_technique_policy` to matrix
+builders and apply shared requirement helpers in manual builders. Skip only known incompatibility,
+with one summary per technique/dataset. Raise if no selected technique can run, even with a baseline.
 
 ### Declaring custom parameters — add via `additional_parameters`
 
@@ -111,30 +118,99 @@ Dropping a common input is not silent: `set_params_from_args` rejects any value 
 
 ## Dataset Loading
 
-Datasets are read from `CentralMemory`.
+Datasets are read from `CentralMemory`. New runs call `prepare_async()` before
+reading. Reads, discovery, estimates, and resume must never fetch or store datasets.
+Resolve parameter-dependent source names before preparation, not during seed reads.
 
 ### Basic — named datasets:
 ```python
-DatasetConfiguration(
-    dataset_names=["airt_hate", "airt_violence"],
-    max_dataset_size=10,  # optional: sample up to N per dataset
+DatasetAttackConfiguration(
+    sources=[
+        DatasetSource(name="harmbench"),
+        DatasetSource(name="airt_hate", max_size=10),
+        DatasetSource(name="team_objectives", max_size="all"),
+    ],
+    max_per_dataset=5,
+    max_total=12,
 )
 ```
 
+With filtered populations of 100, 40, and 7 groups, selection has two steps:
+
+| Dataset | Full population | After source cap |
+| --- | --- | --- |
+| `harmbench` | 100 | 5 (inherits `max_per_dataset`) |
+| `airt_hate` | 40 | 10 (explicit `max_size`) |
+| `team_objectives` | 7 | 7 (`"all"` removes the source cap) |
+
+The total cap then samples 12 groups from these 22 groups. The split can be 3, 6,
+and 3, for example; it is not balanced or guaranteed to cover every dataset.
+A dataset with no selected groups keeps its key with an empty list.
+
 ### Advanced — custom subclass for filtering:
 ```python
-class MyDatasetConfiguration(DatasetConfiguration):
-    def get_seed_groups(self) -> dict[str, list[SeedGroup]]:
-        result = super().get_seed_groups()
-        # Filter by selected techniques via self._scenario_techniques
-        return filtered_result
+class MyDatasetConfiguration(DatasetAttackConfiguration):
+    def _build_attack_groups(self, seeds: list[Seed]) -> list[AttackSeedGroup]:
+        return build_custom_groups(seeds)
 ```
 
 Options:
-- `dataset_names` — load by name from memory
-- `seed_groups` — pass explicit groups (mutually exclusive with `dataset_names`)
-- `max_dataset_size` — cap per dataset
-- Override `_load_seed_groups_for_dataset()` for custom loading
+- `sources` selects datasets by name. Source `max_size` overrides `max_per_dataset`;
+  omitted, `None`, empty, and `"default"` mean inherit; `"all"` means no cap.
+- All dataset limits use the same rule: omitted, `None`, empty, and `"default"` use the
+  default; `"all"` removes that limit; a positive integer sets a cap.
+- `max_per_dataset=5` is the named-objective default. `max_total="all"` leaves the
+  combined selection uncapped. Apply source limits before the total limit.
+- `DatasetSource(provider=...)` attaches a configured `SeedDatasetProvider` instance whose
+  `dataset_name` must match the source name. It takes precedence over registry lookup.
+  Configuration copies must preserve live providers by identity, not serialize or deep-copy them.
+- `fetch=DatasetFetchPolicy.IF_MISSING` prepares absent configured or registered datasets.
+  `NEVER` requires stored data. `ALWAYS` fetches with `cache=False` and atomically replaces
+  the complete stored dataset for a new run. It requires a configured or registered provider,
+  even when data is already stored. A filter miss must never trigger another fetch.
+- With `IF_MISSING`, stored rows win even if a configured provider's inputs change.
+  Refresh can remove manual edits and prevent older runs from resuming. All provider results
+  are fetched and checked before any dataset write. Candidates and retained sources must
+  pass the same filters, custom grouping, and child/compound validators used by normal reads,
+  without sampling. Memory prepares copied candidates first, including checksums, attribution,
+  timestamps, and media metadata. Commit that prepared snapshot without preparing it again.
+  A fetch, preparation, grouping, or validation failure keeps every dataset unchanged.
+  Media preparation may leave unreferenced files when validation fails; stored seed rows remain unchanged.
+  Storage commits remain per dataset: a later write failure does not undo an earlier successful write.
+  Generation count and selection limits are separate; filters and limits do not reduce the
+  replacement. Use a new dataset name to keep another generated batch.
+  Use one writer per name; concurrent runs can generate and store different batches.
+- `seed_groups` and `seeds` are inline alternatives. They never use memory or providers.
+- Validators run on full filtered populations before any sampling.
+- Ingredients must remain complete. Use `max_per_dataset="all"` and no finite source
+  `max_size`; cap the assembled attack groups with `max_total`, not ingredient rows.
+- Use `with_overrides()` instead of reconstructing a subclass or mutating its defaults.
+- Clients and Python use `ScenarioDatasetRequest` through the common `dataset_overrides`
+  parameter. `dataset_config` still replaces the default; overrides apply on top.
+- Resolve parameter/technique-dependent names in `_resolve_default_dataset_config()`,
+  before overrides, validation, and preparation. Do not rewrite user selections in validators.
+- Declare `DATASET_OPTIONS` (or parameter-aware `get_dataset_options()`): `ANY` only for
+  generic named populations, `SUBSET` for approved alternatives, `FIXED` for ingredients.
+  Disable limits that would truncate ingredients. Compound source edits are ambiguous;
+  preserve child shaping/caps and allow only supported global edits.
+- Estimates expose `dataset_defaults`, `effective_datasets`, and `dataset_options`.
+  These are response projections, not incoming edit state. Never read seeds for projections.
+  The catalog reads options and defaults from registry metadata, never from an estimate.
+- Explicit `load_datasets_async()` remains missing-only, regardless of the scan's policy.
+  It does not refresh or change that policy.
+- Resume replays the saved launch request; the stored run plan fixes the selected seed groups,
+  so caps and fetch policies cannot change a resumed run. Dataset names are checked by the
+  stored scenario identity. Resume never prepares datasets.
+- Keep custom shaping in `_build_attack_groups()` or `_build_groups_by_dataset_async()`.
+  Reads use `_collect_seeds_for_dataset_async()` and must not fetch.
+- Build synthesized prompts from those filtered seeds, not a second unfiltered memory query.
+  Scenario code must not call memory seed-read methods directly; the scenario contract test enforces this.
+- `dataset_names`, `max_dataset_size`, `auto_fetch`, and `per_dataset()` are deprecated.
+
+`max_dataset_size` is an exact alias for `max_total`; it does not disable source caps.
+To keep the old total-only selection of up to 10 groups, use
+`max_per_dataset="all", max_total=10`. To remove both caps, set both to `"all"`;
+`None` now uses the default, not unlimited selection.
 
 ## Technique Enum
 
@@ -142,8 +218,8 @@ Technique members should represent **attack techniques** — the *how* of an att
 
 ```python
 class MyTechnique(ScenarioTechnique):
-    ALL = ("all", {"all"})                  # Required aggregate
-    DEFAULT = ("default", {"default"})      # Recommended default aggregate
+    ALL = ("all", {"all"})  # Required aggregate
+    DEFAULT = ("default", {"default"})  # Recommended default aggregate
     SINGLE_TURN = ("single_turn", {"single_turn"})  # Category aggregate
 
     PromptSending = ("prompt_sending", {"single_turn", "default"})
@@ -153,11 +229,33 @@ class MyTechnique(ScenarioTechnique):
     @classmethod
     def get_aggregate_tags(cls) -> set[str]:
         return {"all", "default", "single_turn", "multi_turn"}
+
+    @classmethod
+    def default(cls) -> "MyTechnique":
+        return cls.DEFAULT  # what runs when the caller selects nothing
 ```
 
 - `ALL` aggregate is always required
 - Each member: `NAME = ("string_value", {tag_set})`
 - Aggregates expand to all techniques matching their tag
+
+### Default Technique
+
+The default technique — what runs when no `scenario_techniques` are passed — is a property
+of the **technique catalog**, not the scenario. It is *not* passed to `super().__init__()`;
+the base `Scenario` reads it from `technique_class.default()`.
+
+- **Statically declared enums:** override the `default()` classmethod to return the default
+  member (e.g. `return cls.DEFAULT`, `return cls.EASY`). If the default is `ALL`, don't
+  override — the base `ScenarioTechnique.default()` already falls back to `ALL`.
+- **Dynamically built enums** (`build_technique_class_from_factories`, the RapidResponse
+  pattern): declare the default via exactly one of `default_tags={...}` (every pool technique
+  carrying any of those tags) or `default_names={...}` (exact technique names). Both build the
+  synthetic `DEFAULT` aggregate and record it so `default()` returns it. Passing both raises
+  `ValueError`. When neither is given (or nothing matches), the default falls back to `ALL`.
+
+The default is scenario-relative: the same catalog technique can be the default for one
+scenario and not another, so there is deliberately no catalog-wide `default` tag.
 
 ### Result grouping (`display_group`)
 
@@ -184,14 +282,23 @@ Note: `atomic_attack_name` must remain unique per `AtomicAttack` for correct res
 Every scenario implements the single abstract extension point:
 
 ```python
-async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
-    ...
+async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]: ...
 ```
 
 `initialize_async` resolves the run's inputs once (objective target, techniques, dataset
-config, memory labels, baseline flag, and seed groups), snapshots them into an immutable
-`ScenarioContext`, calls this method, and then inserts the baseline centrally. Scenario authors
-never read half-initialized `self._*` state to build attacks — read everything from `context`.
+config, memory labels, technique converters, baseline flag, and seed groups), snapshots them into an immutable
+`ScenarioContext`, and calls this method. Each scenario emits its own baseline from within
+`_build_atomic_attacks_async` (see the Baseline section below). Scenario authors never read
+half-initialized `self._*` state to build attacks — read everything from `context`.
+Nested construction helpers must also use context inputs, not the corresponding
+`self._objective_target`, `self._scenario_techniques`, `self._memory_labels`,
+`self._incompatible_technique_policy`, or `self._technique_converters` fields.
+Scenario-specific scorers, selectors, and construction options stay on the scenario.
+
+On resume, `context.stored_run_plan` carries the original plan. Restore committed
+per-input technique choices from it instead of selecting again. The base restores
+the planned source population before builders check compatibility. Saved adaptive
+choices must identify the full technique, including its prompts, not only its inner attack.
 
 ### Zero-boilerplate matrix scenarios
 
@@ -199,23 +306,25 @@ Scenarios whose construction is the plain technique × dataset cross-product del
 `build_matrix_atomic_attacks` helper in one line (see `Cyber`, `RapidResponse`):
 
 ```python
+from pyrit.common.async_compatibility import run_legacy_sync_async
 from pyrit.scenario.core.matrix_atomic_attack_builder import build_matrix_atomic_attacks
 
+
 async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
-    return build_matrix_atomic_attacks(
+    return await run_legacy_sync_async(
+        build_matrix_atomic_attacks,
         context=context,
         objective_scorer=self._objective_scorer,
-        technique_converters=self._technique_converters,  # optional CLI converter stacks
     )
 ```
 
 `build_matrix_atomic_attacks`:
 1. Calls `resolve_technique_factories(context=context)` to map the selected techniques to their
    registered `AttackTechniqueFactory` instances (reads the `AttackTechniqueRegistry` singleton;
-   techniques with no registered factory are dropped).
+   raises ``TechniqueResolutionError`` if any selected technique has no registered factory).
 2. Iterates every (technique × dataset) pair from `context.seed_groups_by_dataset`.
 3. Calls `factory.create()` with the objective target, conditional scorer override, and any
-   per-technique converters (from `--techniques <technique>:converter.<name>`) as
+   `context.technique_converters` (from `--techniques <technique>:converter.<name>`) as
    `extra_request_converters`.
 4. Builds each `AtomicAttack` with a unique `atomic_attack_name` and a `display_group`
    (customizable via `display_group_fn`).
@@ -235,27 +344,32 @@ and is loaded into the registry by `TechniqueInitializer`.
 from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
 
 AttackTechniqueFactory(
-    name="prompt_sending",                  # REQUIRED — must match the technique enum value
+    name="prompt_sending",  # REQUIRED — must match the technique enum value
     attack_class=PromptSendingAttack,
     technique_tags=["core", "single_turn", "default"],
     attack_kwargs={"max_turns": 5},
-    adversarial_chat=None,                  # None = resolve adversarial target lazily at create()
+    adversarial_chat=None,  # None = resolve adversarial target lazily at create()
     seed_technique=None,
-    uses_adversarial=None,                  # None = auto-derive from attack signature/seeds
+    uses_adversarial=None,  # None = auto-derive from attack signature/seeds
     scorer_override_policy=ScorerOverridePolicy.WARN,
 )
 ```
 
 Key points:
 - `name` is required and must match the technique enum value the scenario looks up.
-- `technique_tags` on the factory drives `TagQuery` filters used by
-  `AttackTechniqueRegistry.build_technique_class_from_factories(...)`. This is **distinct**
-  from the per-entry `tags` argument passed to `registry.register_technique(...)`.
+- `technique_tags` on the factory drives the aggregates and default selection built by
+  `AttackTechniqueRegistry.build_technique_class_from_factories(...)`: every tag present in
+  the pool auto-promotes to a selectable aggregate, and `default_tags` picks the default set
+  by tag. This is **distinct** from the per-entry `tags` argument passed to
+  `registry.register_technique(...)`.
 - `uses_adversarial` is auto-derived from the attack class signature (presence of
   `attack_adversarial_config`) and seed shape; pass `False` explicitly to opt out, or
   `True` to force opt-in.
 - `kwargs` are validated against the attack class constructor signature at
   factory-construction time, so typos fail loudly and early.
+- Check factory and attack-class requirements through `TargetRequirements.check` to retain custom validation.
+- Use shared seed preparation before adding technique seeds. Keep source groups unchanged and record adaptation.
+- Reject saved plans whose technique identity or accepted inputs cannot be restored.
 
 The canonical catalog factories live in `pyrit/setup/initializers/techniques/`; see
 [setup-techniques.instructions.md](setup-techniques.instructions.md) for how to add one
@@ -275,20 +389,26 @@ resolves without falling back to `OpenAIChatTarget`.
 
 ### Baseline
 
-The baseline (a `PromptSendingAttack` over the run's seeds) is inserted **centrally** by
-`Scenario.initialize_async` according to the scenario's `BASELINE_ATTACK_POLICY` class var and
-the runtime `include_baseline` flag. `_build_atomic_attacks_async` must **never** prepend its own
-baseline — doing so double-emits it and reintroduces baseline-vs-technique population divergence
-under `max_dataset_size`.
+The baseline is a `PromptSendingAttack` over the run's seeds. Each scenario emits its **own**
+baseline from within `_build_atomic_attacks_async`, gated on `context.include_baseline` (which
+`initialize_async` resolves from the scenario's `BASELINE_ATTACK_POLICY` class var and the runtime
+`include_baseline` flag). Matrix scenarios get it for free — `build_matrix_atomic_attacks` prepends
+it when `context.include_baseline` is set. Hand-built scenarios prepend it themselves via the
+`build_baseline_atomic_attack` helper (at index 0), reusing `context.seed_groups` so the baseline
+samples the same seeds as the techniques. Emit **one baseline per independently scored population**
+and only when `context.include_baseline` is set: most scenarios score a single population and emit
+exactly one, while a scenario with several separately-scored populations (e.g. Psychosocial's
+per-sub-harm scorers) emits one per population. Never double-emit a baseline for the *same*
+population — that reintroduces baseline-vs-technique population divergence under `max_dataset_size`.
 
 ### Manual AtomicAttack construction:
 
 ```python
 AtomicAttack(
-    atomic_attack_name=technique_name,   # groups related attacks
+    atomic_attack_name=technique_name,  # groups related attacks
     attack_technique=AttackTechnique(attack=attack_instance),  # bundles the AttackStrategy
-    seed_groups=list(seed_groups),       # must be non-empty
-    memory_labels=context.memory_labels, # from the context snapshot
+    seed_groups=list(seed_groups),  # must be non-empty
+    memory_labels=context.memory_labels,  # from the context snapshot
 )
 ```
 

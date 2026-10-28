@@ -7,16 +7,36 @@ from __future__ import annotations
 
 import copy
 import types
+from abc import ABC, abstractmethod
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    ValidationError,
+    computed_field,
+    field_serializer,
+    model_validator,
+)
 
 from pyrit.common.apply_defaults import REQUIRED_VALUE
 
-_SUPPORTED_SCALAR_TYPES: tuple[type, ...] = (str, int, float, bool)
-_SCALAR_NAME_TO_TYPE: dict[str, type] = {"int": int, "float": float, "bool": bool, "str": str}
+_SUPPORTED_SCALAR_TYPES: tuple[type, ...] = (str, int, float, bool, Path)
+_SCALAR_NAME_TO_TYPE: dict[str, type | types.UnionType] = {
+    "Path": Path,
+    "Path | str": Path | str,
+    "bool": bool,
+    "float": float,
+    "int": int,
+    "str": str,
+}
 
 
 class ComponentType(str, Enum):
@@ -51,6 +71,21 @@ class RegistryReference:
     annotation: Any | None = None
 
 
+class StructuredParameterValue(ABC):
+    """A parameter value with explicitly allowed structured variants."""
+
+    @classmethod
+    @abstractmethod
+    def get_registry_input_variants(cls) -> dict[str, type[StructuredParameterValue]]:
+        """
+        Declare the implementations available for registry construction.
+
+        Returns:
+            dict[str, type[StructuredParameterValue]]: Input names mapped to subclasses of the declaring type.
+        """
+        ...
+
+
 class Parameter(BaseModel):
     """
     Describes a parameter that a PyRIT component accepts.
@@ -60,17 +95,21 @@ class Parameter(BaseModel):
     value's live Python type and its allowed set (a ``Literal[...]`` or ``Enum``
     *is* the allowed set) and drives ``coerce_value`` / ``validate``; it is **not**
     serialized. Serialization instead projects the type into the display fields
-    ``type_name``, ``choices``, and ``is_list`` (plus ``required`` from the
-    ``REQUIRED_VALUE`` sentinel), so a consumer can rebuild a usable contract from
-    the registry without the live type travelling on the wire.
+    ``type_name``, ``choices``, ``is_list``, ``sensitive``, ``multiline``, and
+    ``identity_conflicting`` (plus ``required`` from the ``REQUIRED_VALUE``
+    sentinel), so a consumer can rebuild a usable contract from the registry
+    without the live type travelling on the wire.
 
     ``reference``, when set, marks the parameter as a registry reference: its value
     is supplied *by name* and resolved to a registered instance by the registry
-    layer (``Parameter`` itself never resolves references). It is also excluded
-    from serialization.
+    layer (``Parameter`` itself never resolves references). The live reference is
+    excluded from serialization; ``reference_type`` exposes its component family,
+    while ``type_name`` and ``is_list`` expose whether clients supply one name or a
+    list of names.
 
-    ``coerce_value`` and ``validate`` are the only public behaviors; all coercion
-    branching lives behind them so callers never touch a free function.
+    Coercion, strict supplied-value checks, and scalar JSON projection live here.
+    ``validate`` checks declarations; ``validate_value`` checks an existing value,
+    while ``validate_json_value`` applies the opt-in strict external-input contract.
     """
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
@@ -93,6 +132,22 @@ class Parameter(BaseModel):
         default=None,
         exclude=True,
         description="Set when the parameter references another registry component (resolved by name); not serialized.",
+    )
+    variants: dict[str, list[Parameter]] | None = Field(
+        default=None,
+        description="Named structured-input variants and their constructor parameters, supplied by the registry.",
+    )
+    sensitive: bool = Field(
+        default=False,
+        description="Whether user interfaces must obscure this parameter's value.",
+    )
+    multiline: bool = Field(
+        default=False,
+        description="Whether user interfaces must preserve line breaks in this parameter's value.",
+    )
+    identity_conflicting: bool = Field(
+        default=False,
+        description="Whether this parameter must be omitted when identity-based authentication is selected.",
     )
     destination: ParameterDestination = Field(
         default=ParameterDestination.CONSTRUCTOR,
@@ -130,21 +185,37 @@ class Parameter(BaseModel):
         """
         if not isinstance(data, dict):
             return data
-        if data.get("param_type") is not None or "type_name" not in data:
+        needs_param_type = data.get("param_type") is None and "type_name" in data
+        needs_reference = data.get("reference") is None and data.get("reference_type") is not None
+        if not needs_param_type and not needs_reference:
             return data
         data = dict(data)
-        data["param_type"] = _param_type_from_display(
-            type_name=data.get("type_name"),
-            choices=data.get("choices"),
-            is_list=bool(data.get("is_list")),
-        )
+        if needs_param_type:
+            data["param_type"] = _param_type_from_display(
+                type_name=data.get("type_name"),
+                choices=data.get("choices"),
+                is_list=bool(data.get("is_list")),
+            )
+        if needs_reference:
+            data["reference"] = RegistryReference(
+                component_type=ComponentType(data["reference_type"]),
+                annotation=data.get("param_type"),
+            )
         return data
+
+    @property
+    def _display_type(self) -> Any:
+        """Wire type, where registry references are supplied as names."""
+        if self.reference is None:
+            return _unwrap_optional(self.param_type)
+        annotation = _unwrap_optional(self.reference.annotation)
+        return list[str] if get_origin(annotation) is list else str
 
     @computed_field
     @property
     def type_name(self) -> str:
         """Display name of the parameter's type (e.g. ``'int'``, ``'str'``, ``'list[str]'``, ``'any'``)."""
-        return _render_type_name(self.param_type)
+        return _render_type_name(self._display_type)
 
     @computed_field
     @property
@@ -156,14 +227,30 @@ class Parameter(BaseModel):
     @property
     def choices(self) -> list[str] | None:
         """Allowed values for a constrained scalar (``Literal`` / ``Enum``), or None when unconstrained."""
-        members = display_choices(self.param_type)
+        members = display_choices(self._display_type)
         return [str(member) for member in members] if members is not None else None
 
     @computed_field
     @property
     def is_list(self) -> bool:
         """True when the parameter accepts a list of values (e.g. ``list[str]``)."""
-        return get_origin(self.param_type) is list
+        return get_origin(self._display_type) is list
+
+    @property
+    def is_path(self) -> bool:
+        """Whether this is a local filesystem path parameter."""
+        return self.reference is None and _unwrap_optional(self.param_type) is Path
+
+    @property
+    def is_path_or_str(self) -> bool:
+        """Whether this parameter accepts paths or strings without URL normalization."""
+        return self.reference is None and _is_path_or_str(self.param_type)
+
+    @computed_field
+    @property
+    def reference_type(self) -> str | None:
+        """Registry component family this parameter references, or None."""
+        return self.reference.component_type.value if self.reference is not None else None
 
     @field_serializer("default")
     def _serialize_default(self, value: Any) -> str | list[str] | None:
@@ -186,23 +273,102 @@ class Parameter(BaseModel):
         return _render_default_value(value)
 
     @property
+    def is_seed_prompt(self) -> bool:
+        """Whether the declared value is a SeedPrompt, optionally nullable."""
+        annotation = _unwrap_optional(self.param_type)
+        if not isinstance(annotation, type) or annotation.__name__ != "SeedPrompt":
+            return False
+        from pyrit.models.seeds.seed_prompt import SeedPrompt
+
+        return annotation is SeedPrompt
+
+    @property
     def is_string_coercible(self) -> bool:
         """
         Whether a single string token can be coerced to this parameter's value.
 
         True for a non-reference plain scalar (``str`` / ``int`` / ``float`` /
-        ``bool``) or ``Literal[...]`` parameter — exactly the forms a text field or
-        CLI token can supply. References and structured types (lists, enums,
-        arbitrary objects) are False and are surfaced/handled elsewhere.
+        ``bool`` / ``Path`` / ``Path | str``), ``Literal[...]``, or ``Enum`` parameter — exactly the forms a
+        text field or CLI token can supply. References and structured types (lists
+        and arbitrary objects) are False and are surfaced/handled elsewhere.
 
         Returns:
             bool: True when a string can be coerced to this parameter's value.
         """
-        if self.reference is not None:
+        if self.reference is not None or self.opaque:
             return False
-        if self.param_type in _SUPPORTED_SCALAR_TYPES:
+        return _is_scalar_param_type(_unwrap_optional(self.param_type)) or self.is_seed_prompt
+
+    @property
+    def is_external_input(self) -> bool:
+        """
+        Whether REST, CLI, and GUI callers may supply this parameter.
+
+        True for registry references, declared structured inputs, scalars (``Path`` and
+        ``Path | str`` included), flat ``list`` / ``Collection`` / ``Sequence`` of non-path
+        scalars, and other unions with one of those as an alternative and no path
+        alternative. External callers supply that
+        alternative, as for ``api_key: str | Callable[...]`` or
+        ``font_size: int | tuple[int, int]``; the other alternatives are for in-process
+        callers. Other parameters take Python objects from in-process callers only.
+        ``SeedPrompt`` parameters accept prompt text at this boundary.
+
+        Returns:
+            bool: True when external callers may supply this parameter.
+        """
+        if self.reference is not None or self.variants is not None:
             return True
-        return get_origin(self.param_type) is Literal
+        if self.opaque:
+            return False
+        if self.is_seed_prompt:
+            return True
+        param_type = _unwrap_optional(self.param_type)
+        if _is_scalar_param_type(param_type):
+            return True
+        if get_origin(param_type) in (Union, types.UnionType):
+            members = [member for member in get_args(param_type) if member is not type(None)]
+            return not any(_mentions_path(member) for member in members) and any(
+                _is_non_path_json_type(member) for member in members
+            )
+        return _is_non_path_json_type(param_type)
+
+    def for_external_catalog(self) -> Parameter:
+        """
+        Describe this parameter in the form external callers send it.
+
+        A flat ``Collection`` or ``Sequence`` is described as a ``list``, and a union as its first
+        alternative in declaration order that external callers can send, so
+        ``font_size: int | tuple[int, int]`` is described as ``int``; ``Path | str`` keeps its own
+        form. Other alternatives are still accepted and coercion is unchanged; only the
+        catalog description changes, and registry metadata keeps the full annotation. A default the
+        described form cannot hold is left out, so callers omit the value and the constructor
+        default applies.
+        ``SeedPrompt`` values are described as multiline text, including loaded defaults.
+
+        Returns:
+            Parameter: This parameter, or a copy whose ``param_type`` is the external form.
+        """
+        if self.reference is not None or self.variants is not None or self.opaque:
+            return self
+        if self.is_seed_prompt:
+            return self.model_copy(
+                update={
+                    "param_type": str | None if type(None) in get_args(self.param_type) else str,
+                    "multiline": True,
+                    "default": self.default.value if hasattr(self.default, "value") else self.default,
+                }
+            )
+        external_type = _external_input_type(self.param_type)
+        if external_type == self.param_type:
+            return self
+        described = self.model_copy(update={"param_type": external_type})
+        if self.default is None or self.default is REQUIRED_VALUE:
+            return described
+        try:
+            described.coerce_value(self.default)
+        except ValueError:
+            return described.model_copy(update={"default": None})
+        return described
 
     def is_reference_to(self, component_type: ComponentType) -> bool:
         """
@@ -220,6 +386,76 @@ class Parameter(BaseModel):
             bool: True when this parameter is a reference to ``component_type``.
         """
         return self.reference is not None and self.reference.component_type is component_type
+
+    @property
+    def is_json_input(self) -> bool:
+        """Whether strict JSON callers can supply this declared scalar, list, reference, or variant."""
+        if self.opaque:
+            return False
+        if self.reference is not None or self.variants is not None:
+            return True
+        if self.is_seed_prompt:
+            return True
+        annotation = _unwrap_optional(self.param_type)
+        if get_origin(annotation) is list:
+            annotation = get_args(annotation)[0] if get_args(annotation) else None
+        return annotation in (str, int, float, bool) or bool(self.choices)
+
+    def validate_json_value(self, value: Any) -> Any:
+        """
+        Validate a supplied JSON value without enabling CLI-style scalar coercion.
+
+        Enum names and values retain their declared coercion. Structured values are
+        validated recursively by registry resolution, not by this lightweight model.
+
+        Returns:
+            Any: The validated value, with constrained scalars converted to their declared members.
+
+        Raises:
+            ValueError: If this parameter requires a Python object or the JSON type is invalid.
+        """
+        if not self.is_json_input:
+            raise ValueError(f"Parameter '{self.name}' requires a Python value; it is not supported through REST")
+        if self.is_seed_prompt:
+            annotation = str | None if type(None) in get_args(self.param_type) else str
+            return TypeAdapter(annotation).validate_python(value, strict=True)
+        TypeAdapter(JsonValue).validate_python(value, strict=True)
+        if self.variants is not None:
+            return value
+        if self.reference is not None:
+            annotation = list[str] if self.is_list else str
+            if type(None) in get_args(self.reference.annotation):
+                annotation = annotation | None
+            return TypeAdapter(annotation).validate_python(value, strict=True)
+        if self.choices:
+            value = self.coerce_value(value)
+        return TypeAdapter(self.param_type).validate_python(value, strict=True)
+
+    def project_json_value(self, value: Any) -> JsonValue:
+        """
+        Project a scalar source value without reconstructing opaque or structured state.
+
+        Returns:
+            JsonValue: A lossless JSON-native value for a supported scalar or list.
+
+        Raises:
+            ValueError: If the source requires a structured or Python-only representation.
+        """
+        if self.reference is not None or self.variants is not None or not self.is_json_input:
+            raise ValueError(f"Parameter '{self.name}' has no lossless scalar JSON projection")
+        if self.is_seed_prompt:
+            from pyrit.models.seeds.seed_prompt import SeedPrompt
+
+            if value is None:
+                return None
+            if not isinstance(value, SeedPrompt):
+                raise ValueError(f"Parameter '{self.name}' expects a SeedPrompt")
+            return value.value
+        if isinstance(value, Enum):
+            value = value.value
+        if isinstance(value, list):
+            value = [item.value if isinstance(item, Enum) else item for item in value]
+        return TypeAdapter(JsonValue).validate_python(value, strict=True)
 
     def coerce_value(self, raw_value: Any) -> Any:
         """
@@ -247,13 +483,44 @@ class Parameter(BaseModel):
         if self.reference is not None or self.opaque:
             return raw_value
         param_type = self.param_type
+        if raw_value is None and type(None) in get_args(param_type):
+            return None
+        param_type = _unwrap_optional(param_type)
         if param_type is None:
             return copy.deepcopy(raw_value)
         if get_origin(param_type) is list:
             return _coerce_list(param_name=self.name, param_type=param_type, raw_value=raw_value)
         if _is_scalar_param_type(param_type):
             return _coerce_simple_value(param_name=self.name, annotation=param_type, raw_value=raw_value)
+        if self.is_seed_prompt:
+            from pyrit.models.seeds.seed_prompt import SeedPrompt
+
+            if isinstance(raw_value, SeedPrompt):
+                return raw_value
+            if not isinstance(raw_value, str):
+                raise ValueError(f"Parameter '{self.name}' expects prompt text or a SeedPrompt")
+            prompt = SeedPrompt(value=raw_value, data_type="text", is_jinja_template=True)
+            prompt.parameters = prompt.get_template_parameter_names()
+            return prompt
         return raw_value
+
+    def validate_value(self, value: Any) -> None:
+        """
+        Check a resolved scalar or list without coercing or replacing it.
+
+        Args:
+            value (Any): The resolved parameter value.
+
+        Raises:
+            ValueError: If the value does not match its declared type or choices.
+        """
+        if self.reference is not None or self.opaque:
+            return
+        if self.is_string_coercible or self.is_list:
+            try:
+                TypeAdapter(self.param_type).validate_python(value, strict=True)
+            except ValidationError as exc:
+                raise ValueError(f"Parameter '{self.name}' expects {self.type_name}: {exc}") from exc
 
     def validate(self) -> None:  # type: ignore[ty:invalid-method-override]
         """
@@ -268,10 +535,10 @@ class Parameter(BaseModel):
         Raises:
             ValueError: If ``param_type`` is unsupported and no default is declared.
         """
-        if self.reference is not None or self.opaque:
+        if self.reference is not None or self.opaque or self.variants is not None:
             return
-        param_type = self.param_type
-        if param_type is None or _is_scalar_param_type(param_type):
+        param_type = _unwrap_optional(self.param_type)
+        if param_type is None or _is_scalar_param_type(param_type) or self.is_seed_prompt:
             return
         if get_origin(param_type) is list:
             type_args = get_args(param_type)
@@ -283,7 +550,7 @@ class Parameter(BaseModel):
 
         raise ValueError(
             f"Parameter '{self.name}' has unsupported param_type {param_type!r}. "
-            f"Supported types: str, int, float, bool, Literal[...], Enum, a list of those, "
+            f"Supported types: str, int, float, bool, Path, Path | str, Literal[...], Enum, a list of those, "
             f"or None (or provide a default)."
         )
 
@@ -309,22 +576,82 @@ def _is_enum_type(annotation: Any) -> bool:
     return isinstance(annotation, type) and issubclass(annotation, Enum)
 
 
+def _is_path_or_str(annotation: Any) -> bool:
+    """Return whether the annotation is ``Path | str``, optionally including None."""
+    return get_origin(annotation) in (Union, types.UnionType) and set(get_args(annotation)) in (
+        {Path, str},
+        {Path, str, type(None)},
+    )
+
+
 def _is_scalar_param_type(annotation: Any) -> bool:
     """
     Return True when ``annotation`` is a coercible scalar form.
 
-    A scalar form is a plain scalar (``str`` / ``int`` / ``float`` / ``bool``) or a
+    A scalar form is a plain scalar (``str`` / ``int`` / ``float`` / ``bool`` / ``Path``) or a
     constrained scalar (``Literal[...]`` or an ``Enum`` subclass) that carries its
     own allowed set.
 
     Returns:
         bool: True when the annotation is a single coercible scalar form.
     """
-    if annotation in _SUPPORTED_SCALAR_TYPES:
+    if annotation in _SUPPORTED_SCALAR_TYPES or _is_path_or_str(annotation):
         return True
     if get_origin(annotation) is Literal:
         return True
     return _is_enum_type(annotation)
+
+
+def _is_non_path_json_type(annotation: Any) -> bool:
+    """
+    Return whether the annotation is a non-path scalar or a flat collection of one.
+
+    A flat collection is a ``list``, ``Collection``, or ``Sequence`` of a single non-path
+    scalar; external callers send it as a JSON array, which reaches the constructor as a list.
+
+    Returns:
+        bool: True for ``str``/``int``/``float``/``bool``/``Literal``/``Enum`` or a flat collection of them.
+    """
+    if get_origin(annotation) in (list, Collection, Sequence):
+        type_args = get_args(annotation)
+        annotation = type_args[0] if len(type_args) == 1 else None
+    return _is_scalar_param_type(annotation) and annotation is not Path and not _is_path_or_str(annotation)
+
+
+def _mentions_path(annotation: Any) -> bool:
+    """
+    Return whether the annotation is ``Path`` or has ``Path`` among its type arguments.
+
+    Returns:
+        bool: True when a value of this type may be a local file path.
+    """
+    return annotation is Path or any(_mentions_path(argument) for argument in get_args(annotation))
+
+
+def _external_input_type(annotation: Any) -> Any:
+    """
+    Return the form external callers send for an annotation.
+
+    A flat ``Collection`` or ``Sequence`` becomes a ``list``, and a union becomes its first
+    alternative external callers can send, keeping ``None`` when the union allows it.
+    ``Path | str`` and every other annotation are returned unchanged.
+
+    Returns:
+        Any: The external form of the annotation.
+    """
+    if _is_path_or_str(annotation):
+        return annotation
+    origin = get_origin(annotation)
+    if origin in (Union, types.UnionType):
+        members = get_args(annotation)
+        supported = next((member for member in members if _is_non_path_json_type(member)), None)
+        if supported is None:
+            return annotation
+        external = _external_input_type(supported)
+        return external | None if type(None) in members else external
+    if origin in (Collection, Sequence) and len(get_args(annotation)) == 1:
+        return list[get_args(annotation)[0]]  # ty: ignore[invalid-type-form]
+    return annotation
 
 
 def _coerce_simple_value(*, param_name: str, annotation: Any, raw_value: Any) -> Any:
@@ -345,6 +672,10 @@ def _coerce_simple_value(*, param_name: str, annotation: Any, raw_value: Any) ->
             cannot be coerced to the annotated scalar type.
     """
     annotation = _unwrap_optional(annotation)
+    if _is_path_or_str(annotation):
+        if isinstance(raw_value, (Path, str)):
+            return raw_value
+        raise ValueError(f"Parameter '{param_name}' expects a Path or str, got {type(raw_value).__name__}.")
     if get_origin(annotation) is Literal:
         return _coerce_literal(param_name=param_name, annotation=annotation, raw_value=raw_value)
     if _is_enum_type(annotation):
@@ -357,6 +688,8 @@ def _coerce_simple_value(*, param_name: str, annotation: Any, raw_value: Any) ->
         return _coerce_scalar(param_name=param_name, scalar_type=float, raw_value=raw_value)
     if annotation is str:
         return str(raw_value)
+    if annotation is Path:
+        return Path(raw_value)
     return raw_value
 
 
@@ -397,24 +730,27 @@ def _coerce_enum(*, param_name: str, enum_type: type[Enum], raw_value: Any) -> A
 
 def _coerce_scalar(*, param_name: str, scalar_type: type, raw_value: Any) -> Any:
     """
-    Coerce ``raw_value`` to ``int`` or ``float`` while rejecting native ``bool`` inputs.
+    Coerce numbers, rejecting booleans and integer conversions that lose a fractional part.
 
     Returns:
         Any: The value coerced to ``scalar_type``.
 
     Raises:
-        ValueError: If ``raw_value`` is a native ``bool`` or cannot be coerced to ``scalar_type``.
+        ValueError: If conversion fails or an integer conversion would lose a fractional part.
     """
     if isinstance(raw_value, bool):
         raise ValueError(
             f"Parameter '{param_name}' expects {scalar_type.__name__} but received a bool ({raw_value!r})."
         )
     try:
-        return scalar_type(raw_value)
-    except (TypeError, ValueError) as exc:
+        result = scalar_type(raw_value)
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(
             f"Parameter '{param_name}' could not be coerced to {scalar_type.__name__}: {raw_value!r} ({exc})."
         ) from exc
+    if scalar_type is int and not isinstance(raw_value, (str, bytes, bytearray)) and result != raw_value:
+        raise ValueError(f"Parameter '{param_name}' expects an integer without a fractional part, got {raw_value!r}.")
+    return result
 
 
 def _coerce_bool(*, param_name: str, raw_value: Any) -> bool:
@@ -503,7 +839,7 @@ def _param_type_from_display(*, type_name: str | None, choices: list[str] | None
     if not type_name or type_name == "any":
         return None
     base_name = type_name.removeprefix("list[").rstrip("]") if is_list else type_name
-    base_type: type = _SCALAR_NAME_TO_TYPE.get(base_name, str)
+    base_type = _SCALAR_NAME_TO_TYPE.get(base_name, str)
     if choices:
         coerced = tuple(_coerce_simple_value(param_name="", annotation=base_type, raw_value=c) for c in choices)
         element_type: Any = Literal[coerced]  # ty: ignore[invalid-type-form]
@@ -532,16 +868,24 @@ def _render_type_name(param_type: Any) -> str:
     if param_type is None:
         return "any"
     param_type = _unwrap_optional(param_type)
+    if _is_path_or_str(param_type):
+        return "Path | str"
     if get_origin(param_type) is Literal:
         args = get_args(param_type)
-        return type(args[0]).__name__ if args else "str"
+        literal_type_name: str = type(args[0]).__name__ if args else "str"
+        return literal_type_name
     if get_origin(param_type) is list:
         type_args = get_args(param_type)
-        element_type = type_args[0] if type_args else str
+        element_type = _unwrap_optional(type_args[0]) if type_args else str
         if get_origin(element_type) is Literal:
             element_args = get_args(element_type)
             element_name = type(element_args[0]).__name__ if element_args else "str"
             return f"list[{element_name}]"
+        if isinstance(element_type, type) and issubclass(element_type, Enum):
+            member = next(iter(element_type), None)
+            return f"list[{type(member.value).__name__ if member is not None else 'str'}]"
+        if _is_scalar_param_type(element_type):
+            return f"list[{_render_type_name(element_type)}]"
     # Detect parameterized generics (list[str], dict[str, int], ...) reliably across Python
     # versions: get_origin returns the unparameterized type for GenericAlias, None otherwise.
     if get_origin(param_type) is not None:
@@ -563,11 +907,19 @@ def display_choices(param_type: Any) -> tuple[Any, ...] | None:
     Args:
         param_type (Any): The parameter's type annotation.
 
+    A ``list[...]`` parameter is unwrapped to its element type first, so a
+    constrained list (``list[Literal[...]]`` / ``list[Enum]``) surfaces its
+    element's allowed set — the ``is_list`` + ``choices`` projection a multi-select
+    consumer needs.
+
     Returns:
         tuple[Any, ...] | None: The allowed members for a constrained scalar
         (``Literal`` args or ``Enum`` member values), or None when unconstrained.
     """
     unwrapped = _unwrap_optional(param_type)
+    if get_origin(unwrapped) is list:
+        type_args = get_args(unwrapped)
+        unwrapped = _unwrap_optional(type_args[0]) if type_args else str
     if get_origin(unwrapped) is Literal:
         return get_args(unwrapped)
     if isinstance(unwrapped, type) and issubclass(unwrapped, Enum):

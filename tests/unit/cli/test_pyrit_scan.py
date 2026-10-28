@@ -7,14 +7,45 @@ Unit tests for the pyrit_scan CLI module (thin REST client).
 
 import logging
 from argparse import Namespace
+from datetime import UTC
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
 from pyrit.cli import _config_reader as pyrit_scan_config_reader
 from pyrit.cli import pyrit_scan
-from pyrit.models import Parameter
+from pyrit.cli._cli_args import parse_run_arguments
+from pyrit.models import Operation, Parameter
 from unit.mocks import make_scenario_result
+
+# A valid UTF-8 initializer whose text is not pure ASCII. Decoded with a Windows ANSI code page
+# this either mangles the prompt (cp1252) or raises UnicodeDecodeError (cp932/936/949/950).
+UTF8_INITIALIZER_SOURCE = (
+    "from pyrit.setup.pyrit_initializer import PyRITInitializer\n"
+    'SYSTEM_PROMPT = "Réponds en français, café. 日本語でも回答してください。"\n'
+)
+
+
+def test_run_operation_id_reaches_typed_request() -> None:
+    operation_id = uuid4()
+    parsed = pyrit_scan._build_parser().parse_args(
+        ["run", "test", "--target", "target", "--operation-id", str(operation_id)]
+    )
+    request = pyrit_scan._build_run_request(parsed_args=parsed, scenario_name="test")
+    assert request.operation_id == operation_id
+    assert request.labels is None
+
+
+async def test_list_operations_prints_names_and_ids_async(capsys) -> None:
+    operation = Operation(name="Directory")
+    client = MagicMock(list_operations_async=AsyncMock(return_value=[operation]))
+    parsed = pyrit_scan._build_parser().parse_args(["list-operations"])
+    assert await pyrit_scan._handle_list_commands_async(client=client, parsed_args=parsed) == 0
+    output = capsys.readouterr().out
+    assert operation.name in output
+    assert str(operation.id) in output
 
 
 def _sp(*, name, description="", default=None, param_type="str", choices=None, is_list=False) -> Parameter:
@@ -29,6 +60,33 @@ def _sp(*, name, description="", default=None, param_type="str", choices=None, i
             "is_list": is_list,
         }
     )
+
+
+@pytest.mark.parametrize("stage", ["entry", "poll"])
+def test_compatibility_failure_exits_without_replay(stage, capsys):
+    from pyrit.cli.api_client import CompatibilityError
+
+    client = _mock_api_client()
+    if stage == "entry":
+        client.__aenter__.side_effect = CompatibilityError("Wrong build")
+    else:
+        client.get_scenario_run_async.side_effect = CompatibilityError("Backend changed")
+    with (
+        patch("pyrit.cli.api_client.PyRITApiClient", return_value=client),
+        patch("pyrit.cli._server_launcher.ServerLauncher.probe_health_async", AsyncMock(return_value=True)),
+    ):
+        assert pyrit_scan.main(["run", "test_scenario", "--target", "t"]) == 1
+    output = capsys.readouterr().out
+    assert "CompatibilityError" in output
+    assert "same PyRIT build" in output
+    assert "No request was automatically replayed" in output
+    client.cancel_scenario_run_async.assert_not_awaited()
+    if stage == "entry":
+        client.start_scenario_run_async.assert_not_awaited()
+    else:
+        client.start_scenario_run_async.assert_awaited_once()
+        client.get_scenario_run_async.assert_awaited_once()
+        assert "server run may still be active" in output
 
 
 def test_dataset_filter_help_covers_every_request_model_key():
@@ -48,69 +106,93 @@ def test_dataset_filter_help_covers_every_request_model_key():
 
 
 class TestParseArgs:
-    """Tests for parse_args function."""
+    """Tests for parse_args with the subcommand model."""
 
-    def test_parse_args_list_scenarios(self):
-        args = pyrit_scan.parse_args(["--list-scenarios"])
-        assert args.list_scenarios is True
-        assert args.scenario_name is None
-
-    def test_parse_args_list_initializers(self):
-        args = pyrit_scan.parse_args(["--list-initializers"])
-        assert args.list_initializers is True
-
-    def test_parse_args_scenario_name_only(self):
-        args = pyrit_scan.parse_args(["test_scenario"])
+    def test_run_scenario_name(self):
+        args = pyrit_scan.parse_args(["run", "test_scenario"])
+        assert args.command == "run"
         assert args.scenario_name == "test_scenario"
         assert args.log_level == logging.WARNING
 
-    def test_parse_args_with_log_level(self):
-        args = pyrit_scan.parse_args(["test_scenario", "--log-level", "DEBUG"])
+    def test_list_scenarios_verb(self):
+        assert pyrit_scan.parse_args(["list-scenarios"]).command == "list-scenarios"
+
+    def test_list_initializers_verb(self):
+        assert pyrit_scan.parse_args(["list-initializers"]).command == "list-initializers"
+
+    def test_list_targets_verb(self):
+        assert pyrit_scan.parse_args(["list-targets"]).command == "list-targets"
+
+    def test_list_converters_verb(self):
+        assert pyrit_scan.parse_args(["list-converters"]).command == "list-converters"
+
+    def test_list_datasets_verb(self):
+        assert pyrit_scan.parse_args(["list-datasets"]).command == "list-datasets"
+
+    def test_add_initializer_verb(self):
+        args = pyrit_scan.parse_args(["add-initializer", "script1.py", "script2.py"])
+        assert args.command == "add-initializer"
+        assert args.files == ["script1.py", "script2.py"]
+
+    def test_stop_server_verb(self):
+        assert pyrit_scan.parse_args(["stop-server"]).command == "stop-server"
+
+    def test_start_server_verb(self):
+        assert pyrit_scan.parse_args(["start-server"]).command == "start-server"
+
+    def test_scenario_history_verb_default_limit(self):
+        args = pyrit_scan.parse_args(["scenario-history"])
+        assert args.command == "scenario-history"
+        assert args.limit == 10
+
+    def test_scenario_history_verb_custom_limit(self):
+        assert pyrit_scan.parse_args(["scenario-history", "25"]).limit == 25
+
+    def test_no_command_is_none(self):
+        assert pyrit_scan.parse_args([]).command is None
+
+    def test_run_with_log_level(self):
+        args = pyrit_scan.parse_args(["run", "test_scenario", "--log-level", "DEBUG"])
         assert args.log_level == logging.DEBUG
 
-    def test_parse_args_with_initializers(self):
-        args = pyrit_scan.parse_args(["test_scenario", "--initializers", "init1", "init2"])
+    def test_run_with_initializers(self):
+        args = pyrit_scan.parse_args(["run", "test_scenario", "--initializers", "init1", "init2"])
         assert args.initializers == ["init1", "init2"]
 
-    def test_parse_args_with_add_initializer(self):
-        args = pyrit_scan.parse_args(["--add-initializer", "script1.py", "script2.py"])
-        assert args.add_initializer == ["script1.py", "script2.py"]
-
-    def test_parse_args_list_datasets(self):
-        args = pyrit_scan.parse_args(["--list-datasets"])
-        assert args.list_datasets is True
-
-    def test_parse_args_with_techniques(self):
-        args = pyrit_scan.parse_args(["test_scenario", "--techniques", "s1", "s2"])
+    def test_run_with_techniques(self):
+        args = pyrit_scan.parse_args(["run", "test_scenario", "--techniques", "s1", "s2"])
         assert args.scenario_techniques == ["s1", "s2"]
 
-    def test_parse_args_with_techniques_short_flag(self):
-        args = pyrit_scan.parse_args(["test_scenario", "-t", "s1", "s2"])
+    def test_run_with_techniques_short_flag(self):
+        args = pyrit_scan.parse_args(["run", "test_scenario", "-t", "s1", "s2"])
         assert args.scenario_techniques == ["s1", "s2"]
 
-    def test_parse_args_with_max_concurrency(self):
-        args = pyrit_scan.parse_args(["test_scenario", "--max-concurrency", "5"])
+    def test_run_with_max_concurrency(self):
+        args = pyrit_scan.parse_args(["run", "test_scenario", "--max-concurrency", "5"])
         assert args.max_concurrency == 5
 
-    def test_parse_args_with_max_retries(self):
-        args = pyrit_scan.parse_args(["test_scenario", "--max-retries", "3"])
+    def test_run_with_max_retries(self):
+        args = pyrit_scan.parse_args(["run", "test_scenario", "--max-retries", "3"])
         assert args.max_retries == 3
 
-    def test_parse_args_with_memory_labels(self):
-        args = pyrit_scan.parse_args(["test_scenario", "--memory-labels", '{"key":"value"}'])
+    def test_run_with_memory_labels(self):
+        args = pyrit_scan.parse_args(["run", "test_scenario", "--memory-labels", '{"key":"value"}'])
         assert args.memory_labels == '{"key":"value"}'
 
-    def test_parse_args_with_dataset_filters(self):
-        args = pyrit_scan.parse_args(["test_scenario", "--dataset-filters", "harm_categories=cyber", "data_types=text"])
+    def test_run_with_dataset_filters(self):
+        args = pyrit_scan.parse_args(
+            ["run", "test_scenario", "--dataset-filters", "harm_categories=cyber", "data_types=text"]
+        )
         assert args.dataset_filters == [("harm_categories", "cyber"), ("data_types", "text")]
 
-    def test_parse_args_dataset_filter_without_equals_errors(self):
+    def test_run_dataset_filter_without_equals_errors(self):
         with pytest.raises(SystemExit):
-            pyrit_scan.parse_args(["test_scenario", "--dataset-filters", "harm_categories"])
+            pyrit_scan.parse_args(["run", "test_scenario", "--dataset-filters", "harm_categories"])
 
-    def test_parse_args_complex_command(self):
+    def test_run_complex_command(self):
         args = pyrit_scan.parse_args(
             [
+                "run",
                 "encoding_scenario",
                 "--log-level",
                 "INFO",
@@ -134,50 +216,150 @@ class TestParseArgs:
         assert args.max_concurrency == 10
         assert args.max_retries == 5
 
-    def test_parse_args_invalid_log_level(self):
+    def test_run_invalid_log_level(self):
         with pytest.raises(SystemExit):
-            pyrit_scan.parse_args(["test_scenario", "--log-level", "INVALID"])
+            pyrit_scan.parse_args(["run", "test_scenario", "--log-level", "INVALID"])
 
-    def test_parse_args_invalid_max_concurrency(self):
+    def test_run_invalid_max_concurrency(self):
         with pytest.raises(SystemExit):
-            pyrit_scan.parse_args(["test_scenario", "--max-concurrency", "0"])
+            pyrit_scan.parse_args(["run", "test_scenario", "--max-concurrency", "0"])
 
-    def test_parse_args_invalid_max_retries(self):
+    def test_run_invalid_max_retries(self):
         with pytest.raises(SystemExit):
-            pyrit_scan.parse_args(["test_scenario", "--max-retries", "-1"])
+            pyrit_scan.parse_args(["run", "test_scenario", "--max-retries", "-1"])
 
-    def test_parse_args_help_flag(self):
+    def test_help_flag(self):
         with pytest.raises(SystemExit) as exc_info:
             pyrit_scan.parse_args(["--help"])
         assert exc_info.value.code == 0
 
-    def test_parse_args_with_target(self):
-        args = pyrit_scan.parse_args(["test_scenario", "--target", "my_target"])
+    def test_run_with_target(self):
+        args = pyrit_scan.parse_args(["run", "test_scenario", "--target", "my_target"])
         assert args.target == "my_target"
 
-    def test_parse_args_target_default_is_none(self):
-        args = pyrit_scan.parse_args(["test_scenario"])
+    def test_run_target_default_is_none(self):
+        args = pyrit_scan.parse_args(["run", "test_scenario"])
         assert args.target is None
 
-    def test_parse_args_with_list_targets(self):
-        args = pyrit_scan.parse_args(["--list-targets"])
-        assert args.list_targets is True
-
-    def test_parse_args_with_list_converters(self):
-        args = pyrit_scan.parse_args(["--list-converters"])
-        assert args.list_converters is True
-
-    def test_parse_args_with_server_url(self):
-        args = pyrit_scan.parse_args(["--list-scenarios", "--server-url", "http://remote:9000"])
+    def test_list_with_server_url(self):
+        args = pyrit_scan.parse_args(["list-scenarios", "--server-url", "http://remote:9000"])
         assert args.server_url == "http://remote:9000"
 
-    def test_parse_args_with_start_server(self):
-        args = pyrit_scan.parse_args(["--list-scenarios", "--start-server"])
+    def test_list_with_auth_mode(self):
+        args = pyrit_scan.parse_args(["list-scenarios", "--auth-mode", "device_code"])
+        assert args.auth_mode == "device_code"
+
+    def test_list_rejects_invalid_auth_mode(self):
+        with pytest.raises(SystemExit):
+            pyrit_scan.parse_args(["list-scenarios", "--auth-mode", "interactive"])
+
+    def test_global_flag_before_verb(self):
+        args = pyrit_scan.parse_args(["--server-url", "http://remote:9000", "list-scenarios"])
+        assert args.command == "list-scenarios"
+        assert args.server_url == "http://remote:9000"
+
+    def test_list_with_start_server(self):
+        args = pyrit_scan.parse_args(["list-scenarios", "--start-server"])
         assert args.start_server is True
 
-    def test_parse_args_with_stop_server(self):
-        args = pyrit_scan.parse_args(["--stop-server"])
-        assert args.stop_server is True
+    def test_list_with_request_timeout(self):
+        args = pyrit_scan.parse_args(["list-scenarios", "--request-timeout", "30"])
+        assert args.request_timeout == 30
+
+    def test_start_server_with_startup_timeout(self):
+        args = pyrit_scan.parse_args(["start-server", "--startup-timeout", "45.5"])
+        assert args.startup_timeout == 45.5
+
+
+class TestGlobalOptionScoping:
+    """Options are scoped to the commands that use them; unsupported combos are rejected."""
+
+    def test_top_level_help_with_global_option_shows_root_help(self, capsys, recwarn):
+        with pytest.raises(SystemExit) as exc_info:
+            pyrit_scan.parse_args(["--server-url", "http://x", "--help"])
+        assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        assert "<command>" in out
+        assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+
+    def test_stop_server_rejects_start_server(self):
+        assert pyrit_scan.main(["stop-server", "--start-server"]) == 2
+
+    def test_stop_server_rejects_request_timeout(self):
+        assert pyrit_scan.main(["stop-server", "--request-timeout", "7"]) == 2
+
+    def test_start_server_rejects_request_timeout(self):
+        assert pyrit_scan.main(["start-server", "--request-timeout", "7"]) == 2
+
+
+class TestClientHandlerTable:
+    """The client-dispatch table must stay in sync with the registered verbs."""
+
+    def test_client_handlers_cover_every_post_client_verb(self):
+        # _dispatch_with_client_async indexes _CLIENT_HANDLERS directly, so a client verb
+        # without a handler would KeyError at runtime. start-server/stop-server run before a
+        # client is opened and are handled in _run_async, so they are the only exclusions.
+        pre_client_verbs = {"start-server", "stop-server"}
+        expected = set(pyrit_scan._KNOWN_VERBS) - pre_client_verbs
+        assert set(pyrit_scan._CLIENT_HANDLERS) == expected
+
+
+class TestLegacyArgvShim:
+    """The back-compat shim maps old flag forms to verbs and warns."""
+
+    def test_legacy_list_flag_maps_to_verb(self):
+        with pytest.warns(DeprecationWarning, match="list-scenarios"):
+            args = pyrit_scan.parse_args(["--list-scenarios"])
+        assert args.command == "list-scenarios"
+
+    def test_legacy_stop_server_flag_maps_to_verb(self):
+        with pytest.warns(DeprecationWarning, match="stop-server"):
+            args = pyrit_scan.parse_args(["--stop-server"])
+        assert args.command == "stop-server"
+
+    def test_legacy_add_initializer_flag_maps_to_verb(self):
+        with pytest.warns(DeprecationWarning, match="add-initializer"):
+            args = pyrit_scan.parse_args(["--add-initializer", "a.py", "b.py"])
+        assert args.command == "add-initializer"
+        assert args.files == ["a.py", "b.py"]
+
+    def test_legacy_flag_preserves_globals(self):
+        with pytest.warns(DeprecationWarning):
+            args = pyrit_scan.parse_args(["--server-url", "http://x", "--list-targets"])
+        assert args.command == "list-targets"
+        assert args.server_url == "http://x"
+
+    def test_implicit_run_maps_to_run_verb(self):
+        with pytest.warns(DeprecationWarning, match="run <scenario>"):
+            args = pyrit_scan.parse_args(["foundry", "--target", "t"])
+        assert args.command == "run"
+        assert args.scenario_name == "foundry"
+        assert args.target == "t"
+
+    def test_standalone_start_server_flag_maps_to_verb(self):
+        with pytest.warns(DeprecationWarning, match="start-server"):
+            args = pyrit_scan.parse_args(["--start-server"])
+        assert args.command == "start-server"
+
+    def test_new_style_verb_does_not_warn(self, recwarn):
+        args = pyrit_scan.parse_args(["list-scenarios"])
+        assert args.command == "list-scenarios"
+        assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+
+    def test_legacy_flag_prints_visible_note(self, capsys):
+        with pytest.warns(DeprecationWarning):
+            pyrit_scan.parse_args(["--list-scenarios"])
+        assert "Note:" in capsys.readouterr().err
+
+    def test_global_before_verb_does_not_warn(self, recwarn):
+        args = pyrit_scan.parse_args(["--server-url", "http://x", "list-scenarios"])
+        assert args.command == "list-scenarios"
+        assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+
+    @pytest.mark.parametrize("value", ["0", "-1", "inf", "nan", "slow"])
+    def test_parse_args_rejects_invalid_startup_timeout(self, value):
+        with pytest.raises(SystemExit):
+            pyrit_scan.parse_args(["--start-server", "--startup-timeout", value])
 
     def test_main_with_invalid_args(self):
         result = pyrit_scan.main(["--invalid-flag"])
@@ -205,7 +387,7 @@ class TestExtractScenarioArgs:
 
 def _make_scenario_result():
     """Build a minimal but valid ``ScenarioResult`` for the run-results happy path."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from pyrit.models import (
         AttackOutcome,
@@ -220,7 +402,7 @@ def _make_scenario_result():
         outcome=AttackOutcome.SUCCESS,
         executed_turns=1,
         execution_time_ms=10,
-        timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        timestamp=datetime(2025, 1, 1, tzinfo=UTC),
     )
     return make_scenario_result(
         scenario_name="test_scenario",
@@ -236,7 +418,7 @@ def _make_scenario_result():
 
 def _mock_api_client():
     """Create a mock PyRITApiClient with default response behaviors (typed wire-data)."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from pyrit.models import ScenarioRunState, TargetCapabilities
     from pyrit.models.catalog import (
@@ -245,7 +427,7 @@ def _mock_api_client():
         TargetInstance,
     )
 
-    now = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2025, 1, 1, tzinfo=UTC)
 
     client = AsyncMock()
     client.health_check_async.return_value = True
@@ -263,6 +445,7 @@ def _mock_api_client():
         all_techniques=[],
         default_datasets=[],
         supported_parameters=[],
+        supported_parameter_names=[],
     )
     client.start_scenario_run_async.return_value = ScenarioRunSummary(
         scenario_result_id="test-id-123",
@@ -313,10 +496,25 @@ class TestMain:
         mock_client = _mock_api_client()
         mock_client_class.return_value = mock_client
 
-        result = pyrit_scan.main(["--list-scenarios"])
+        result = pyrit_scan.main(["list-scenarios"])
 
         assert result == 0
         mock_client.list_scenarios_async.assert_awaited_once()
+
+    @patch(
+        "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
+        new_callable=AsyncMock,
+        return_value=True,
+    )
+    @patch("pyrit.cli.api_client.PyRITApiClient")
+    def test_main_passes_auth_mode_to_client(self, mock_client_class, mock_probe):
+        mock_client = _mock_api_client()
+        mock_client_class.return_value = mock_client
+
+        result = pyrit_scan.main(["list-scenarios", "--auth-mode", "azure_cli"])
+
+        assert result == 0
+        assert mock_client_class.call_args.kwargs["auth_mode"] == "azure_cli"
 
     @patch(
         "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
@@ -329,7 +527,7 @@ class TestMain:
         mock_client = _mock_api_client()
         mock_client_class.return_value = mock_client
 
-        result = pyrit_scan.main(["--list-initializers"])
+        result = pyrit_scan.main(["list-initializers"])
 
         assert result == 0
         mock_client.list_initializers_async.assert_awaited_once()
@@ -345,7 +543,7 @@ class TestMain:
         mock_client = _mock_api_client()
         mock_client_class.return_value = mock_client
 
-        result = pyrit_scan.main(["--list-targets"])
+        result = pyrit_scan.main(["list-targets"])
 
         assert result == 0
         mock_client.list_targets_async.assert_awaited_once()
@@ -357,7 +555,7 @@ class TestMain:
         mock_client = _mock_api_client()
         mock_client_class.return_value = mock_client
 
-        result = pyrit_scan.main(["--list-converters"])
+        result = pyrit_scan.main(["list-converters"])
 
         assert result == 0
         mock_client.list_converters_async.assert_awaited_once()
@@ -369,7 +567,7 @@ class TestMain:
         mock_client = _mock_api_client()
         mock_client_class.return_value = mock_client
 
-        result = pyrit_scan.main(["--list-datasets"])
+        result = pyrit_scan.main(["list-datasets"])
 
         assert result == 0
         mock_client.list_datasets_async.assert_awaited_once()
@@ -391,7 +589,7 @@ class TestMain:
         mock_client = _mock_api_client()
         mock_client_class.return_value = mock_client
 
-        result = pyrit_scan.main(["test_scenario", "--target", "my_target"])
+        result = pyrit_scan.main(["run", "test_scenario", "--target", "my_target"])
 
         assert result == 0
         mock_client.get_scenario_async.assert_awaited_once()
@@ -409,7 +607,7 @@ class TestMain:
         mock_client = _mock_api_client()
         mock_client_class.return_value = mock_client
 
-        result = pyrit_scan.main(["test_scenario", "--target", "t", "--initializers", "target", "datasets"])
+        result = pyrit_scan.main(["run", "test_scenario", "--target", "t", "--initializers", "target", "datasets"])
 
         assert result == 0
         call_kwargs = mock_client.start_scenario_run_async.call_args.kwargs
@@ -423,7 +621,7 @@ class TestMain:
     )
     def test_main_server_not_available(self, mock_probe, capsys):
         """Test main when server is not available."""
-        result = pyrit_scan.main(["--list-scenarios"])
+        result = pyrit_scan.main(["list-scenarios"])
 
         assert result == 1
         captured = capsys.readouterr()
@@ -438,7 +636,7 @@ class TestMain:
             "_DEFAULT_CONFIG_FILE",
             tmp_path / "missing_default.yaml",
         ):
-            result = pyrit_scan.main(["--list-scenarios", "--config-file", str(bad)])
+            result = pyrit_scan.main(["list-scenarios", "--config-file", str(bad)])
 
         assert result == 1
         assert "not valid YAML" in capsys.readouterr().err
@@ -450,7 +648,7 @@ class TestMain:
     )
     def test_main_stop_server(self, mock_probe, capsys):
         """Test main with --stop-server."""
-        result = pyrit_scan.main(["--stop-server"])
+        result = pyrit_scan.main(["stop-server"])
 
         assert result == 0
         captured = capsys.readouterr()
@@ -468,7 +666,7 @@ class TestMain:
         mock_client.get_scenario_async.return_value = None
         mock_client_class.return_value = mock_client
 
-        result = pyrit_scan.main(["nonexistent_scenario", "--target", "t"])
+        result = pyrit_scan.main(["run", "nonexistent_scenario", "--target", "t"])
 
         assert result == 1
         captured = capsys.readouterr()
@@ -482,12 +680,12 @@ class TestMain:
     @patch("pyrit.cli.api_client.PyRITApiClient")
     def test_main_failed_scenario(self, mock_client_class, mock_probe):
         """Test main when scenario run fails."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from pyrit.models import ScenarioRunState
         from pyrit.models.catalog import ScenarioRunSummary
 
-        now = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        now = datetime(2025, 1, 1, tzinfo=UTC)
         mock_client = _mock_api_client()
         mock_client.get_scenario_run_async.return_value = ScenarioRunSummary(
             scenario_result_id="test-id",
@@ -503,7 +701,7 @@ class TestMain:
         )
         mock_client_class.return_value = mock_client
 
-        result = pyrit_scan.main(["test_scenario", "--target", "t"])
+        result = pyrit_scan.main(["run", "test_scenario", "--target", "t"])
 
         assert result == 1
 
@@ -513,13 +711,24 @@ class TestMain:
 # ---------------------------------------------------------------------------
 
 
+def test_resolve_auth_mode_rejects_unsupported_programmatic_value() -> None:
+    parsed_args = Namespace(config_file=None, auth_mode="invalid")
+
+    with (
+        patch("pyrit.cli._config_reader.read_server_settings", return_value=MagicMock(auth_mode="auto")),
+        pytest.raises(ValueError, match="Unsupported authentication mode"),
+    ):
+        pyrit_scan._resolve_auth_mode(parsed_args=parsed_args)
+
+
 class TestStopServerOnPort:
     """Tests for stop_server_on_port helper (now lives in _server_launcher)."""
 
     @patch("sys.platform", "win32")
     @patch("subprocess.run")
     @patch("os.kill")
-    def test_stop_on_windows_finds_pid_via_netstat(self, mock_kill, mock_run):
+    @patch("pyrit.cli._server_launcher._wait_for_process_exit", return_value=True)
+    def test_stop_on_windows_finds_pid_via_netstat(self, _mock_wait, mock_kill, mock_run):
         from pyrit.cli import _server_launcher
 
         mock_run.return_value = MagicMock(
@@ -547,7 +756,8 @@ class TestStopServerOnPort:
     @patch("sys.platform", "win32")
     @patch("subprocess.run")
     @patch("os.kill")
-    def test_stop_on_windows_matches_ipv6_local_address(self, mock_kill, mock_run):
+    @patch("pyrit.cli._server_launcher._wait_for_process_exit", return_value=True)
+    def test_stop_on_windows_matches_ipv6_local_address(self, _mock_wait, mock_kill, mock_run):
         from pyrit.cli import _server_launcher
 
         mock_run.return_value = MagicMock(
@@ -559,7 +769,8 @@ class TestStopServerOnPort:
     @patch("sys.platform", "linux")
     @patch("subprocess.run")
     @patch("os.kill")
-    def test_stop_on_unix_finds_pid_via_lsof(self, mock_kill, mock_run):
+    @patch("pyrit.cli._server_launcher._wait_for_process_exit", return_value=True)
+    def test_stop_on_unix_finds_pid_via_lsof(self, _mock_wait, mock_kill, mock_run):
         from pyrit.cli import _server_launcher
 
         mock_run.return_value = MagicMock(stdout="5678\n")
@@ -616,6 +827,19 @@ class TestAddScenarioParamsFromApi:
 
 class TestBuildRunRequest:
     """Tests for _build_run_request."""
+
+    @pytest.mark.parametrize("value", [None, "default", "all", "7", ""])
+    def test_limit_presence_matches_shell_parser(self, value: str | None) -> None:
+        flags = [] if value is None else ["--max-dataset-size", value]
+        parsed = pyrit_scan.parse_args(["run", "test", "--target", "target", *flags])
+        request = pyrit_scan._build_run_request(parsed_args=parsed, scenario_name="test")
+        shell_args = parse_run_arguments(
+            args_string="test --target target " + ("--max-dataset-size ''" if value == "" else " ".join(flags))
+        )
+        assert ("max_dataset_size" in request.model_fields_set) == (value is not None)
+        assert ("max_dataset_size" in shell_args) == (value is not None)
+        expected = 7 if value == "7" else value or "default"
+        assert request.max_dataset_size == shell_args.get("max_dataset_size", "default") == expected
 
     def test_includes_initializer_args(self):
         parsed = Namespace(
@@ -712,9 +936,15 @@ class TestResolveServerUrl:
             start_server=False,
             config_file=None,
         )
-        with patch(
-            "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
-            new=AsyncMock(return_value=True),
+        with (
+            patch(
+                "pyrit.cli._config_reader.read_server_settings",
+                return_value=pyrit_scan_config_reader.ServerSettings(),
+            ),
+            patch(
+                "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
+                new=AsyncMock(return_value=True),
+            ),
         ):
             result = await pyrit_scan._resolve_server_url_async(parsed_args=parsed)
         assert result == "http://override:7000"
@@ -723,8 +953,8 @@ class TestResolveServerUrl:
         parsed = Namespace(server_url=None, start_server=False, config_file=None)
         with (
             patch(
-                "pyrit.cli._config_reader.read_server_url",
-                return_value=None,
+                "pyrit.cli._config_reader.read_server_settings",
+                return_value=pyrit_scan_config_reader.ServerSettings(),
             ),
             patch(
                 "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
@@ -735,23 +965,36 @@ class TestResolveServerUrl:
 
     async def test_auto_starts_server_when_requested(self):
         parsed = Namespace(server_url=None, start_server=True, config_file=None)
+        start_async_mock = AsyncMock(return_value="http://localhost:8000")
         with (
-            patch("pyrit.cli._config_reader.read_server_url", return_value=None),
+            patch(
+                "pyrit.cli._config_reader.read_server_settings",
+                return_value=pyrit_scan_config_reader.ServerSettings(),
+            ),
             patch(
                 "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
                 new=AsyncMock(return_value=False),
             ),
             patch(
                 "pyrit.cli._server_launcher.ServerLauncher.start_async",
-                new=AsyncMock(return_value="http://localhost:8000"),
+                new=start_async_mock,
             ),
         ):
             assert await pyrit_scan._resolve_server_url_async(parsed_args=parsed) == "http://localhost:8000"
+        start_async_mock.assert_awaited_once_with(
+            host="localhost",
+            port=8000,
+            config_file=None,
+            startup_timeout=120.0,
+        )
 
     async def test_returns_none_when_start_server_raises(self, capsys):
         parsed = Namespace(server_url=None, start_server=True, config_file=None)
         with (
-            patch("pyrit.cli._config_reader.read_server_url", return_value=None),
+            patch(
+                "pyrit.cli._config_reader.read_server_settings",
+                return_value=pyrit_scan_config_reader.ServerSettings(),
+            ),
             patch(
                 "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
                 new=AsyncMock(return_value=False),
@@ -764,12 +1007,14 @@ class TestResolveServerUrl:
             assert await pyrit_scan._resolve_server_url_async(parsed_args=parsed) is None
         assert "nope" in capsys.readouterr().out
 
-    async def test_start_server_refuses_when_url_differs_from_default(self, capsys):
-        # User explicitly configured a non-default URL but asks us to launch the bundled
-        # backend. The launcher only knows how to bind localhost:8000, so we must refuse.
+    async def test_start_server_refuses_remote_url(self, capsys):
         parsed = Namespace(server_url="http://other:9999", start_server=True, config_file=None)
         start_async_mock = AsyncMock()
         with (
+            patch(
+                "pyrit.cli._config_reader.read_server_settings",
+                return_value=pyrit_scan_config_reader.ServerSettings(),
+            ),
             patch(
                 "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
                 new=AsyncMock(return_value=False),
@@ -786,14 +1031,66 @@ class TestResolveServerUrl:
         assert "cannot --start-server" in err
         assert "http://other:9999" in err
 
+    async def test_start_server_uses_custom_local_port(self):
+        parsed = Namespace(server_url="http://127.0.0.1:8765", start_server=True, config_file=None)
+        start_async_mock = AsyncMock(return_value="http://127.0.0.1:8765")
+        with (
+            patch(
+                "pyrit.cli._config_reader.read_server_settings",
+                return_value=pyrit_scan_config_reader.ServerSettings(),
+            ),
+            patch(
+                "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "pyrit.cli._server_launcher.ServerLauncher.start_async",
+                new=start_async_mock,
+            ),
+        ):
+            result = await pyrit_scan._resolve_server_url_async(parsed_args=parsed)
+        assert result == "http://127.0.0.1:8765"
+        start_async_mock.assert_awaited_once_with(
+            host="127.0.0.1",
+            port=8765,
+            config_file=None,
+            startup_timeout=120.0,
+        )
+
+    async def test_start_server_cli_timeout_overrides_config(self):
+        parsed = Namespace(
+            server_url=None,
+            start_server=True,
+            config_file=None,
+            startup_timeout=15.0,
+        )
+        start_async_mock = AsyncMock(return_value="http://localhost:8000")
+        with (
+            patch(
+                "pyrit.cli._config_reader.read_server_settings",
+                return_value=pyrit_scan_config_reader.ServerSettings(startup_timeout=90.0),
+            ),
+            patch(
+                "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "pyrit.cli._server_launcher.ServerLauncher.start_async",
+                new=start_async_mock,
+            ),
+        ):
+            await pyrit_scan._resolve_server_url_async(parsed_args=parsed)
+
+        assert start_async_mock.await_args.kwargs["startup_timeout"] == 15.0
+
     async def test_resolution_order_cli_beats_config_beats_default(self):
         """CLI flag > config-file value > built-in default."""
         # 1) CLI flag wins even when config has a different value.
         parsed = Namespace(server_url="http://cli:1111", start_server=False, config_file=None)
         with (
             patch(
-                "pyrit.cli._config_reader.read_server_url",
-                return_value="http://cfg:2222",
+                "pyrit.cli._config_reader.read_server_settings",
+                return_value=pyrit_scan_config_reader.ServerSettings(url="http://cfg:2222"),
             ),
             patch(
                 "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
@@ -806,8 +1103,8 @@ class TestResolveServerUrl:
         parsed = Namespace(server_url=None, start_server=False, config_file=None)
         with (
             patch(
-                "pyrit.cli._config_reader.read_server_url",
-                return_value="http://cfg:2222",
+                "pyrit.cli._config_reader.read_server_settings",
+                return_value=pyrit_scan_config_reader.ServerSettings(url="http://cfg:2222"),
             ),
             patch(
                 "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
@@ -821,7 +1118,10 @@ class TestResolveServerUrl:
 
         parsed = Namespace(server_url=None, start_server=False, config_file=None)
         with (
-            patch("pyrit.cli._config_reader.read_server_url", return_value=None),
+            patch(
+                "pyrit.cli._config_reader.read_server_settings",
+                return_value=pyrit_scan_config_reader.ServerSettings(),
+            ),
             patch(
                 "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
                 new=AsyncMock(return_value=True),
@@ -829,9 +1129,64 @@ class TestResolveServerUrl:
         ):
             assert await pyrit_scan._resolve_server_url_async(parsed_args=parsed) == DEFAULT_SERVER_URL
 
+    async def test_raises_type_error_when_configured_url_is_not_a_string(self):
+        """A non-string configured URL (e.g. malformed config) raises TypeError."""
+        parsed = Namespace(server_url=None, start_server=False, config_file=None)
+        with patch(
+            "pyrit.cli._config_reader.read_server_settings",
+            return_value=pyrit_scan_config_reader.ServerSettings(url=12345),  # type: ignore[arg-type]
+        ):
+            with pytest.raises(TypeError, match="Configured server URL must be a string"):
+                await pyrit_scan._resolve_server_url_async(parsed_args=parsed)
+
+
+class TestResolveConfiguredServerUrl:
+    """Tests for _resolve_configured_server_url."""
+
+    def test_uses_cli_flag_when_provided(self):
+        parsed = Namespace(server_url="http://cli:1111", config_file=None)
+        assert pyrit_scan._resolve_configured_server_url(parsed_args=parsed) == "http://cli:1111"
+
+    def test_falls_back_to_config_file(self):
+        parsed = Namespace(server_url=None, config_file=None)
+        with patch("pyrit.cli._config_reader.read_server_url", return_value="http://cfg:2222"):
+            assert pyrit_scan._resolve_configured_server_url(parsed_args=parsed) == "http://cfg:2222"
+
+    def test_falls_back_to_default(self):
+        from pyrit.cli._config_reader import DEFAULT_SERVER_URL
+
+        parsed = Namespace(server_url=None, config_file=None)
+        with patch("pyrit.cli._config_reader.read_server_url", return_value=None):
+            assert pyrit_scan._resolve_configured_server_url(parsed_args=parsed) == DEFAULT_SERVER_URL
+
+    def test_raises_type_error_when_configured_url_is_not_a_string(self):
+        """A non-string configured URL (e.g. malformed config) raises TypeError."""
+        parsed = Namespace(server_url=None, config_file=None)
+        with patch("pyrit.cli._config_reader.read_server_url", return_value=12345):
+            with pytest.raises(TypeError, match="Configured server URL must be a string"):
+                pyrit_scan._resolve_configured_server_url(parsed_args=parsed)
+
 
 class TestScenarioParamCoercion:
     """Regression tests for client-side coercion of typed scenario-declared params."""
+
+    @pytest.mark.parametrize("policy", ["skip", "raise"])
+    def test_compatibility_policy_flag_uses_api_enum_choices(self, policy: str) -> None:
+        from argparse import ArgumentParser
+
+        from pyrit.scenario import Scenario
+
+        parameter = next(p for p in Scenario.supported_parameters() if p.name == "incompatible_technique_policy")
+        api_parameter = Parameter.model_validate(parameter.model_dump(mode="json"))
+        assert api_parameter.choices == ["skip", "raise"]
+        parser = ArgumentParser()
+        pyrit_scan._add_scenario_params_from_api(parser=parser, params=[api_parameter])
+
+        parsed = parser.parse_args(["--incompatible-technique-policy", policy])
+
+        assert parsed.scenario__incompatible_technique_policy == policy
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--incompatible-technique-policy", "adapt"])
 
     def test_list_param_uses_nargs_plus(self):
         from argparse import ArgumentParser
@@ -956,6 +1311,7 @@ class TestMainExtraPaths:
         mock_client.list_scenarios_async.return_value = [
             RegisteredScenario(
                 scenario_name="alt_a",
+                supported_parameter_names=[],
                 scenario_type="X",
                 description="",
                 default_technique="",
@@ -965,6 +1321,7 @@ class TestMainExtraPaths:
             ),
             RegisteredScenario(
                 scenario_name="alt_b",
+                supported_parameter_names=[],
                 scenario_type="X",
                 description="",
                 default_technique="",
@@ -975,7 +1332,7 @@ class TestMainExtraPaths:
         ]
         mock_client_class.return_value = mock_client
 
-        result = pyrit_scan.main(["nonexistent", "--target", "t"])
+        result = pyrit_scan.main(["run", "nonexistent", "--target", "t"])
         assert result == 1
         captured = capsys.readouterr()
         assert "alt_a" in captured.out
@@ -992,10 +1349,35 @@ class TestMainExtraPaths:
         mock_client.start_scenario_run_async.side_effect = RuntimeError("server full")
         mock_client_class.return_value = mock_client
 
-        result = pyrit_scan.main(["test_scenario", "--target", "t"])
+        result = pyrit_scan.main(["run", "test_scenario", "--target", "t"])
         assert result == 1
         captured = capsys.readouterr()
         assert "server full" in captured.out
+
+    @patch(
+        "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
+        new_callable=AsyncMock,
+        return_value=True,
+    )
+    @patch("pyrit.cli.api_client.PyRITApiClient")
+    def test_main_start_scenario_read_timeout_reports_type_and_hint(self, mock_client_class, _mock_probe, capsys):
+        """A ReadTimeout stringifies to '', so the type and a hint have to carry the message."""
+        import httpx
+
+        mock_client = _mock_api_client()
+        mock_client.start_scenario_run_async.side_effect = httpx.ReadTimeout("")
+        mock_client_class.return_value = mock_client
+
+        result = pyrit_scan.main(["run", "test_scenario", "--target", "t"])
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "ReadTimeout" in captured.out
+        assert "--request-timeout" in captured.out
+        # The server keeps initializing after the client gives up, so the outcome is unknown
+        # and must not be reported as a definite failure to start.
+        assert "unknown whether the run started" in captured.out
+        assert "could not be started" not in captured.out
+        assert "scenario-history" in captured.out
 
     @patch(
         "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
@@ -1008,7 +1390,7 @@ class TestMainExtraPaths:
         mock_client.get_scenario_run_results_async.side_effect = RuntimeError("nope")
         mock_client_class.return_value = mock_client
 
-        result = pyrit_scan.main(["test_scenario", "--target", "t"])
+        result = pyrit_scan.main(["run", "test_scenario", "--target", "t"])
         # A completed run whose results can't be fetched/parsed is a hard CLI failure.
         assert result == 1
         captured = capsys.readouterr()
@@ -1024,8 +1406,40 @@ class TestMainExtraPaths:
         return_value=True,
     )
     @patch("pyrit.cli.api_client.PyRITApiClient")
+    def test_main_run_results_read_timeout_points_at_scenario_results(self, mock_client_class, _mock_probe, capsys):
+        """Results are fetched with the request timeout, unlike polling, so they can time out."""
+        import httpx
+
+        mock_client = _mock_api_client()
+        mock_client.get_scenario_run_results_async.side_effect = httpx.ReadTimeout("")
+        mock_client_class.return_value = mock_client
+
+        result = pyrit_scan.main(["run", "test_scenario", "--target", "t"])
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "ReadTimeout" in captured.out
+        assert "scenario-results" in captured.out
+        assert "--request-timeout" in captured.out
+
+    def test_print_cli_exception_surfaces_empty_read_timeout(self, capsys):
+        """A bare ReadTimeout stringifies to '', so the helper has to carry the message."""
+        import httpx
+
+        pyrit_scan._print_cli_exception(exc=httpx.ReadTimeout(""))
+        captured = capsys.readouterr()
+        assert "ReadTimeout" in captured.out
+        assert "did not respond in time" in captured.out
+        # Only pyrit_scan verbs reach the helper with a timeout, and they all take the flag.
+        assert "--request-timeout" in captured.out
+
+    @patch(
+        "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
+        new_callable=AsyncMock,
+        return_value=True,
+    )
+    @patch("pyrit.cli.api_client.PyRITApiClient")
     def test_main_start_server_only_prints_url_and_returns_zero(self, mock_client_class, _mock_probe, capsys):
-        result = pyrit_scan.main(["--start-server"])
+        result = pyrit_scan.main(["start-server"])
         assert result == 0
         captured = capsys.readouterr()
         assert "running" in captured.out.lower()
@@ -1036,10 +1450,27 @@ class TestMainExtraPaths:
         return_value=True,
     )
     @patch("pyrit.cli._server_launcher.stop_server_on_port", return_value=True)
-    def test_main_stop_server_kills_process_and_returns_zero(self, _stop_mock, _mock_probe, capsys):
-        result = pyrit_scan.main(["--stop-server"])
+    def test_main_stop_server_kills_process_and_returns_zero(self, _stop_mock, mock_probe, capsys):
+        mock_probe.side_effect = [True, False]
+        result = pyrit_scan.main(["stop-server"])
         assert result == 0
         assert "stopped" in capsys.readouterr().out
+
+    async def test_handle_stop_server_offloads_blocking_shutdown(self):
+        parsed_args = pyrit_scan.parse_args(["stop-server"])
+        to_thread_mock = AsyncMock(return_value=True)
+        probe_mock = AsyncMock(side_effect=[True, False])
+
+        with (
+            patch("asyncio.to_thread", new=to_thread_mock),
+            patch("pyrit.cli._server_launcher.ServerLauncher.probe_health_async", new=probe_mock),
+            patch("pyrit.cli._server_launcher.stop_server_on_port") as stop_mock,
+        ):
+            result = await pyrit_scan._handle_stop_server_async(parsed_args=parsed_args)
+
+        assert result == 0
+        to_thread_mock.assert_awaited_once_with(stop_mock, port=8000)
+        stop_mock.assert_not_called()
 
     @patch(
         "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
@@ -1048,10 +1479,33 @@ class TestMainExtraPaths:
     )
     @patch("pyrit.cli._server_launcher.stop_server_on_port", return_value=False)
     def test_main_stop_server_when_process_cannot_be_identified(self, _stop_mock, _mock_probe, capsys):
-        result = pyrit_scan.main(["--stop-server"])
-        assert result == 0
+        result = pyrit_scan.main(["stop-server"])
+        assert result == 1
         out = capsys.readouterr().out
-        assert "could not identify" in out
+        assert "could not be stopped" in out
+
+    @patch(
+        "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
+        new_callable=AsyncMock,
+        return_value=True,
+    )
+    @patch("pyrit.cli._server_launcher.stop_server_on_port", return_value=True)
+    def test_main_stop_server_fails_when_backend_remains_healthy(self, _stop_mock, _mock_probe, capsys):
+        result = pyrit_scan.main(["stop-server"])
+        assert result == 1
+        assert "still responding" in capsys.readouterr().out
+
+    @patch(
+        "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
+        new_callable=AsyncMock,
+    )
+    @patch("pyrit.cli._server_launcher.stop_server_on_port")
+    def test_main_stop_server_refuses_remote_url(self, stop_mock, probe_mock, capsys):
+        result = pyrit_scan.main(["stop-server", "--server-url", "http://remote:8000"])
+        assert result == 1
+        stop_mock.assert_not_called()
+        probe_mock.assert_not_called()
+        assert "Cannot stop non-local server" in capsys.readouterr().err
 
     @patch(
         "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
@@ -1064,7 +1518,7 @@ class TestMainExtraPaths:
         mock_client_class.return_value = mock_client
         missing = tmp_path / "nonexistent.py"
 
-        result = pyrit_scan.main(["--add-initializer", str(missing)])
+        result = pyrit_scan.main(["add-initializer", str(missing)])
         assert result == 1
         assert "File not found" in capsys.readouterr().out
 
@@ -1082,10 +1536,41 @@ class TestMainExtraPaths:
         script = tmp_path / "myinit.py"
         script.write_text("# stub initializer\n")
 
-        result = pyrit_scan.main(["--add-initializer", str(script)])
+        result = pyrit_scan.main(["add-initializer", str(script)])
         assert result == 0
         assert "Registered initializer 'myinit'" in capsys.readouterr().out
         mock_client.register_initializer_async.assert_awaited_once()
+
+    async def test_handle_add_initializer_reads_with_aiofiles(self, tmp_path):
+        script = tmp_path / "myinit.py"
+        script.write_text("content read outside the event loop")
+        parsed_args = Namespace(files=[str(script)])
+        client = AsyncMock()
+        async_file = MagicMock()
+        async_file.__aenter__ = AsyncMock(return_value=async_file)
+        async_file.__aexit__ = AsyncMock(return_value=None)
+        async_file.read = AsyncMock(return_value="# stub initializer\n")
+
+        with patch("pyrit.cli.pyrit_scan.aiofiles.open", return_value=async_file) as open_mock:
+            result = await pyrit_scan._handle_add_initializer_async(client=client, parsed_args=parsed_args)
+
+        assert result == 0
+        open_mock.assert_called_once_with(script.resolve(), encoding="utf-8")
+        async_file.read.assert_awaited_once()
+        assert client.register_initializer_async.await_args.kwargs["script_content"] == "# stub initializer\n"
+
+    async def test_handle_add_initializer_reads_source_as_utf8(self, tmp_path):
+        """Initializer source is UTF-8 (PEP 3120), not the machine's locale encoding."""
+        script = tmp_path / "utf8_init.py"
+        script.write_bytes(UTF8_INITIALIZER_SOURCE.encode("utf-8"))
+        client = AsyncMock()
+
+        result = await pyrit_scan._handle_add_initializer_async(
+            client=client, parsed_args=Namespace(files=[str(script)])
+        )
+
+        assert result == 0
+        assert client.register_initializer_async.await_args.kwargs["script_content"] == UTF8_INITIALIZER_SOURCE
 
     @patch(
         "pyrit.cli._server_launcher.ServerLauncher.probe_health_async",
@@ -1103,9 +1588,189 @@ class TestMainExtraPaths:
         script = tmp_path / "myinit.py"
         script.write_text("# stub\n")
 
-        result = pyrit_scan.main(["--add-initializer", str(script)])
+        result = pyrit_scan.main(["add-initializer", str(script)])
         assert result == 1
         assert "disabled" in capsys.readouterr().out
+
+
+class TestScenarioResults:
+    """Tests for the ``scenario-results`` verb and its handler."""
+
+    def test_parse_args_recognizes_scenario_results(self):
+        args = pyrit_scan.parse_args(
+            ["scenario-results", "SID", "--view", "attacks", "--attack-result-ids", "a", "b", "--limit", "2"]
+        )
+        assert args.command == "scenario-results"
+        assert args.scenario_result_id == "SID"
+        assert args.view.value == "attacks"
+        assert args.attack_result_ids == ["a", "b"]
+        assert args.limit == 2
+
+    def test_handle_results_overview_delegates_to_printer(self):
+        import asyncio
+
+        client = AsyncMock()
+        client.get_scenario_run_results_async.return_value = _make_scenario_result()
+        parsed = pyrit_scan.parse_args(["scenario-results", "SID"])
+        with patch("pyrit.cli._output.print_scenario_result_async", new_callable=AsyncMock) as mock_print:
+            rc = asyncio.run(pyrit_scan._handle_results_async(client=client, parsed_args=parsed))
+        assert rc == 0
+        client.get_scenario_run_results_async.assert_awaited_once_with(scenario_result_id="SID")
+        mock_print.assert_awaited_once()
+
+    def test_handle_results_json_output_writes_file(self, tmp_path):
+        import asyncio
+        import json
+
+        out = tmp_path / "out.json"
+        client = AsyncMock()
+        client.get_scenario_run_results_async.return_value = _make_scenario_result()
+        parsed = pyrit_scan.parse_args(["scenario-results", "SID", "--format", "json", "-o", str(out)])
+        rc = asyncio.run(pyrit_scan._handle_results_async(client=client, parsed_args=parsed))
+        assert rc == 0
+        assert json.loads(out.read_text(encoding="utf-8"))["view"] == "overview"
+
+    def test_handle_results_pretty_output_file_errors(self, tmp_path, capsys):
+        import asyncio
+
+        out = tmp_path / "out.txt"
+        client = AsyncMock()
+        parsed = pyrit_scan.parse_args(["scenario-results", "SID", "--format", "pretty", "-o", str(out)])
+        rc = asyncio.run(pyrit_scan._handle_results_async(client=client, parsed_args=parsed))
+        assert rc == 1
+        assert "requires --format json" in capsys.readouterr().out
+        assert not out.exists()
+
+    def test_handle_results_html_output_writes_report(self, tmp_path):
+        import asyncio
+
+        out = tmp_path / "report.html"
+        client = AsyncMock()
+        client.get_scenario_run_results_async.return_value = _make_scenario_result()
+        client.get_conversation_messages_async.return_value = {"messages": []}
+        parsed = pyrit_scan.parse_args(["scenario-results", "SID", "--format", "html", "-o", str(out)])
+        rc = asyncio.run(pyrit_scan._handle_results_async(client=client, parsed_args=parsed))
+        assert rc == 0
+        text = out.read_text(encoding="utf-8")
+        assert "<!DOCTYPE html>" in text
+        assert "test_scenario" in text
+
+    def test_handle_results_html_without_output_errors(self, capsys):
+        import asyncio
+
+        client = AsyncMock()
+        parsed = pyrit_scan.parse_args(["scenario-results", "SID", "--format", "html"])
+        rc = asyncio.run(pyrit_scan._handle_results_async(client=client, parsed_args=parsed))
+        assert rc == 1
+        assert "requires --output" in capsys.readouterr().out
+
+    def test_handle_results_attacks_prints_table(self, capsys):
+        import asyncio
+
+        client = AsyncMock()
+        client.get_scenario_run_results_async.return_value = _make_scenario_result()
+        parsed = pyrit_scan.parse_args(["scenario-results", "SID", "--view", "attacks"])
+        rc = asyncio.run(pyrit_scan._handle_results_async(client=client, parsed_args=parsed))
+        assert rc == 0
+        assert "extract data" in capsys.readouterr().out
+
+    def test_handle_results_conversations_fetches_and_prints(self, capsys):
+        import asyncio
+
+        client = AsyncMock()
+        client.get_scenario_run_results_async.return_value = _make_scenario_result()
+        client.get_conversation_messages_async.return_value = {
+            "messages": [
+                {"role": "user", "turn_number": 0, "message_pieces": [{"converted_value": "give me data"}]},
+            ]
+        }
+        parsed = pyrit_scan.parse_args(["scenario-results", "SID", "--view", "conversations"])
+        rc = asyncio.run(pyrit_scan._handle_results_async(client=client, parsed_args=parsed))
+        assert rc == 0
+        client.get_conversation_messages_async.assert_awaited_once()
+        assert client.get_conversation_messages_async.await_args.kwargs["conversation_id"] == "conv-1"
+        out = capsys.readouterr().out
+        assert "give me data" in out
+        assert "Conversations" in out
+
+    def test_handle_results_rejects_unknown_view_without_falling_back_to_conversations(self, capsys):
+        import asyncio
+
+        client = AsyncMock()
+        client.get_scenario_run_results_async.return_value = _make_scenario_result()
+        parsed = pyrit_scan.parse_args(["scenario-results", "SID"])
+        unknown_view: Any = "future_view"
+        parsed.view = unknown_view
+        with patch("pyrit.cli._output.print_conversations_async", new_callable=AsyncMock) as mock_conversations:
+            rc = asyncio.run(pyrit_scan._handle_results_async(client=client, parsed_args=parsed))
+        assert rc == 1
+        assert "future_view" in capsys.readouterr().out
+        mock_conversations.assert_not_awaited()
+
+    def test_handle_results_full_prints_overview_then_transcripts(self, capsys):
+        import asyncio
+
+        client = AsyncMock()
+        client.get_scenario_run_results_async.return_value = _make_scenario_result()
+        client.get_conversation_messages_async.return_value = {"messages": []}
+        parsed = pyrit_scan.parse_args(["scenario-results", "SID", "--view", "full"])
+        rc = asyncio.run(pyrit_scan._handle_results_async(client=client, parsed_args=parsed))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "SCENARIO RESULTS" in out
+        assert "Conversations" in out
+        assert "▼ Attack Results" not in out
+
+    def test_handle_results_full_json_stdout_stays_single_document(self, capsys):
+        import asyncio
+        import json
+
+        client = AsyncMock()
+        client.get_scenario_run_results_async.return_value = _make_scenario_result()
+        client.get_conversation_messages_async.return_value = {"messages": []}
+        # No --output and no --limit: the heavy-view notice fires, but must not corrupt stdout json.
+        parsed = pyrit_scan.parse_args(["scenario-results", "SID", "--view", "full", "--format", "json"])
+        rc = asyncio.run(pyrit_scan._handle_results_async(client=client, parsed_args=parsed))
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "at most 5" in captured.err  # advisory notice went to stderr
+        assert json.loads(captured.out)["view"] == "full"  # stdout is one valid json document
+
+    def test_handle_results_conversations_reports_fetch_error(self, capsys):
+        import asyncio
+
+        client = AsyncMock()
+        client.get_scenario_run_results_async.return_value = _make_scenario_result()
+        client.get_conversation_messages_async.side_effect = RuntimeError("boom")
+        parsed = pyrit_scan.parse_args(["scenario-results", "SID", "--view", "conversations"])
+        rc = asyncio.run(pyrit_scan._handle_results_async(client=client, parsed_args=parsed))
+        assert rc == 1
+        assert "boom" in capsys.readouterr().out
+
+    def test_handle_results_reports_fetch_error(self, capsys):
+        import asyncio
+
+        client = AsyncMock()
+        client.get_scenario_run_results_async.side_effect = RuntimeError("boom")
+        parsed = pyrit_scan.parse_args(["scenario-results", "SID"])
+        rc = asyncio.run(pyrit_scan._handle_results_async(client=client, parsed_args=parsed))
+        assert rc == 1
+        assert "boom" in capsys.readouterr().out
+
+
+class TestScenarioHistory:
+    """Tests for the ``scenario-history`` verb and its handler."""
+
+    def test_handle_scenario_history_lists_runs(self, capsys):
+        import asyncio
+
+        client = AsyncMock()
+        client.list_scenario_runs_async.return_value = []
+        parsed = pyrit_scan.parse_args(["scenario-history", "5"])
+        rc = asyncio.run(pyrit_scan._handle_scenario_history_async(client=client, parsed_args=parsed))
+        assert rc == 0
+        client.list_scenario_runs_async.assert_awaited_once_with(limit=5)
+        assert "No scenario runs found" in capsys.readouterr().out
 
 
 class TestScenarioParamFlow:
@@ -1113,7 +1778,7 @@ class TestScenarioParamFlow:
 
     @staticmethod
     def _build_mock_client(supported_params=None, status="COMPLETED"):
-        from datetime import datetime, timezone
+        from datetime import datetime
         from unittest.mock import AsyncMock
 
         from pyrit.models import ScenarioRunState
@@ -1122,7 +1787,7 @@ class TestScenarioParamFlow:
             ScenarioRunSummary,
         )
 
-        now = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        now = datetime(2025, 1, 1, tzinfo=UTC)
         typed_params: list[Parameter] = []
         for p in supported_params or []:
             if isinstance(p, Parameter):
@@ -1143,6 +1808,7 @@ class TestScenarioParamFlow:
         client.list_scenarios_async.return_value = [
             RegisteredScenario(
                 scenario_name="foo",
+                supported_parameter_names=[],
                 scenario_type="X",
                 description="",
                 default_technique="",
@@ -1160,6 +1826,7 @@ class TestScenarioParamFlow:
             all_techniques=[],
             default_datasets=[],
             supported_parameters=typed_params,
+            supported_parameter_names=[parameter.name for parameter in typed_params],
         )
         client.start_scenario_run_async.return_value = ScenarioRunSummary(
             scenario_result_id="rid",
@@ -1196,7 +1863,7 @@ class TestScenarioParamFlow:
         client = self._build_mock_client(supported_params=[{"name": "max_turns", "description": "..."}])
         mock_client_class.return_value = client
 
-        result = pyrit_scan.main(["foo", "--target", "t", "--max-turns", "7"])
+        result = pyrit_scan.main(["run", "foo", "--target", "t", "--max-turns", "7"])
 
         assert result == 0
         sent_request = client.start_scenario_run_async.call_args.kwargs["request"]
@@ -1226,7 +1893,7 @@ class TestScenarioParamFlow:
         )
         mock_client_class.return_value = client
 
-        result = pyrit_scan.main(["foo", "--target", "t", "--dry-run", "yes", "--sample-ids", "1", "2"])
+        result = pyrit_scan.main(["run", "foo", "--target", "t", "--dry-run", "yes", "--sample-ids", "1", "2"])
 
         assert result == 0
         sent_request = client.start_scenario_run_async.call_args.kwargs["request"]
@@ -1244,7 +1911,7 @@ class TestScenarioParamFlow:
         client = self._build_mock_client(supported_params=[{"name": "max_turns", "description": "..."}])
         mock_client_class.return_value = client
 
-        result = pyrit_scan.main(["foo", "--target", "t", "--max-turns", "7", "--unknown-flag"])
+        result = pyrit_scan.main(["run", "foo", "--target", "t", "--max-turns", "7", "--unknown-flag"])
 
         assert result == 1
         client.start_scenario_run_async.assert_not_called()
@@ -1261,7 +1928,7 @@ class TestScenarioParamFlow:
         client = self._build_mock_client(supported_params=[])
         mock_client_class.return_value = client
 
-        result = pyrit_scan.main(["foo", "--target", "t"])
+        result = pyrit_scan.main(["run", "foo", "--target", "t"])
 
         assert result == 0
         sent_request = client.start_scenario_run_async.call_args.kwargs["request"]
@@ -1269,7 +1936,7 @@ class TestScenarioParamFlow:
 
     def test_parse_args_tolerates_scenario_specific_flags(self):
         # Pass 1 must not error on scenario-declared flags (they're recognized in pass 2).
-        parsed = pyrit_scan.parse_args(["foo", "--target", "t", "--max-turns", "7"])
+        parsed = pyrit_scan.parse_args(["run", "foo", "--target", "t", "--max-turns", "7"])
         assert parsed.scenario_name == "foo"
         assert parsed.target == "t"
         assert parsed._unknown_args == ["--max-turns", "7"]
@@ -1279,13 +1946,13 @@ class TestPollStreamsRetryWarnings:
     """The poll loop should stream retry warnings as attack results land."""
 
     async def test_poll_prints_retry_warnings_once(self, capsys):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from pyrit.models import ScenarioRunState
         from pyrit.models.catalog import AttackRetrySummary, ScenarioRunSummary
         from pyrit.models.retry_event import RetryEvent
 
-        now = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        now = datetime(2025, 1, 1, tzinfo=UTC)
         retry = RetryEvent(
             attempt_number=3,
             exception_type="RateLimitError",
@@ -1324,9 +1991,7 @@ class TestPollStreamsRetryWarnings:
         )
 
         with patch("asyncio.sleep", new=AsyncMock(return_value=None)):
-            final = await pyrit_scan._poll_until_terminal_async(
-                client=client, scenario_result_id="sr-1", total_techniques=1
-            )
+            final = await pyrit_scan._poll_until_terminal_async(client=client, scenario_result_id="sr-1")
 
         assert final.status == ScenarioRunState.COMPLETED
         out = capsys.readouterr().out

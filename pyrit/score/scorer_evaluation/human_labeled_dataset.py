@@ -4,8 +4,9 @@
 
 import logging
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Optional, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from uuid import uuid4
 
 import pandas as pd
@@ -15,6 +16,8 @@ from pyrit.models import Message, MessagePiece, PromptDataType
 from pyrit.score.scorer_evaluation.metrics_type import MetricsType
 
 if TYPE_CHECKING:
+    from collections.abc import Hashable
+
     from pyrit.models.harm_definition import HarmDefinition
 
 logger = logging.getLogger(__name__)
@@ -84,10 +87,11 @@ class HarmHumanLabeledEntry(HumanLabeledEntry):
 @dataclass
 class ObjectiveHumanLabeledEntry(HumanLabeledEntry):
     """
-    A class that represents a human-labeled dataset entry for a specific objective. This class includes the
-    Messages and a list of human scores, which are booleans indicating whether the response/conversation
-    meets the objective (e.g., 0 for not meeting the objective, 1 for meeting the objective). The objective is a
-    string that represents the objective (e.g., "how to make a Molotov cocktail?).
+    A human-labeled entry for one assistant response and a specific objective.
+
+    The conversation must contain exactly one assistant message. Other messages provide
+    context for scorers that read conversation history. Each human score indicates
+    whether the labeled response meets the objective.
     """
 
     human_scores: list[bool]
@@ -159,7 +163,7 @@ class HumanLabeledDataset:
         self.harm_definition_version = harm_definition_version
         self._harm_definition_obj: HarmDefinition | None = None
 
-    def get_harm_definition(self) -> Optional["HarmDefinition"]:
+    def get_harm_definition(self) -> "HarmDefinition | None":
         """
         Load and return the HarmDefinition object for this dataset.
 
@@ -185,6 +189,40 @@ class HumanLabeledDataset:
 
         return self._harm_definition_obj
 
+    @staticmethod
+    def _read_leading_comment_block(csv_path: str | Path) -> tuple[list[str], int]:
+        """
+        Scan the leading "#" comment and blank lines of a CSV file.
+
+        Reading the comment text and the skip count from a single scan keeps metadata
+        parsing and the pandas ``skiprows`` count from disagreeing about where the
+        header row starts. "utf-8-sig" drops a byte-order mark, which does not start a
+        "#" line but would otherwise leave the metadata line looking like data.
+
+        Args:
+            csv_path (str | Path): The path to the CSV file.
+
+        Returns:
+            tuple[list[str], int]: The comment lines with their leading "#" removed, and
+                the number of physical lines pandas must skip to reach the header row.
+        """
+        for encoding in ("utf-8-sig", "latin-1"):
+            comments: list[str] = []
+            skiprows = 0
+            try:
+                with open(csv_path, encoding=encoding) as f:
+                    for line in f:
+                        stripped = line.strip()
+                        if stripped.startswith("#"):
+                            comments.append(stripped[1:].strip())
+                        elif stripped:
+                            break
+                        skiprows += 1
+            except UnicodeDecodeError:
+                continue
+            return comments, skiprows
+        return [], 0
+
     @classmethod
     def from_csv(
         cls,
@@ -205,8 +243,13 @@ class HumanLabeledDataset:
         - 'objective': For OBJECTIVE datasets, the objective being evaluated
         - 'data_type': Optional data type (defaults to 'text' if not present)
 
-        You can optionally include a # comment line at the top of the CSV file to specify
-        the dataset version and harm definition path. The format is:
+        Objective labels are validated without numeric rounding and must represent
+        exactly 0 or 1, or a boolean. Harm labels are floats between 0.0 and 1.0.
+
+        You can optionally include # comment lines at the top of the CSV file to specify
+        the dataset version and harm definition path; the metadata may appear on any of
+        them. Only leading # lines are treated as comments; a # anywhere else is
+        preserved as literal data. The format is:
         - For harm datasets: # dataset_version=x.y, harm_definition=path/to/definition.yaml, harm_definition_version=x.y
         - For objective datasets: # dataset_version=x.y
 
@@ -227,34 +270,32 @@ class HumanLabeledDataset:
 
         Raises:
             FileNotFoundError: If the CSV file does not exist.
-            ValueError: If version is not provided and not found in the CSV file.
+            ValueError: If version is not provided and not found in the CSV file,
+                required cells are missing, or objective labels are not binary.
         """
         csv_path = verify_and_resolve_path(csv_path)
-        # Read the first line to check for version and harm_definition info
+        # One scan of the leading block yields both the metadata comments and the number
+        # of rows pandas must skip, so the two can never disagree.
+        comment_lines, skiprows = cls._read_leading_comment_block(csv_path)
         parsed_version = None
         parsed_harm_definition = None
         parsed_harm_definition_version = None
-        try:
-            with open(csv_path, encoding="utf-8") as f:
-                first_line = f.readline().strip()
-        except UnicodeDecodeError:
-            with open(csv_path, encoding="latin-1") as f:
-                first_line = f.readline().strip()
-        if first_line.startswith("#"):
+        for content in comment_lines:
             # Parse key=value pairs from the comment line
             # Format: # dataset_version=x.y, harm_definition=path/to/file.yaml, harm_definition_version=x.y
-            content = first_line[1:].strip()  # Remove leading #
+            # The first occurrence of a key wins, so a later prose comment that happens to
+            # contain "key=value" cannot override metadata declared above it.
             for part in content.split(","):
                 part = part.strip()
                 if "=" in part:
                     key, value = part.split("=", 1)
                     key = key.strip()
                     value = value.strip()
-                    if key == "dataset_version":
+                    if key == "dataset_version" and parsed_version is None:
                         parsed_version = value
-                    elif key == "harm_definition":
+                    elif key == "harm_definition" and parsed_harm_definition is None:
                         parsed_harm_definition = value
-                    elif key == "harm_definition_version":
+                    elif key == "harm_definition_version" and parsed_harm_definition_version is None:
                         parsed_harm_definition_version = value
 
         # Use provided values or fall back to parsed values
@@ -270,11 +311,25 @@ class HumanLabeledDataset:
         if not harm_definition_version and parsed_harm_definition_version:
             harm_definition_version = parsed_harm_definition_version
 
+        # Skipping the counted leading rows, rather than passing comment="#", keeps a
+        # literal "#" inside an unquoted cell from truncating the rest of the row (#2974).
+        # Preserve text before pandas can infer numeric or boolean values.
+        text_dtypes: dict[Hashable, type[str]] = dict.fromkeys(
+            (
+                cls.STANDARD_ASSISTANT_RESPONSE_COL,
+                cls.STANDARD_OBJECTIVE_COL,
+                cls.STANDARD_HARM_COL,
+                cls.STANDARD_DATA_TYPE_COL,
+            ),
+            str,
+        )
+        # Keep objective labels as text until validation, before rounding or underflow can occur.
+        csv_dtypes = str if metrics_type == MetricsType.OBJECTIVE else text_dtypes
         # Try UTF-8 first, fall back to latin-1 for files with special characters
         try:
-            eval_df = pd.read_csv(csv_path, comment="#", encoding="utf-8")
+            eval_df = pd.read_csv(csv_path, skiprows=skiprows or None, encoding="utf-8", dtype=csv_dtypes)
         except UnicodeDecodeError:
-            eval_df = pd.read_csv(csv_path, comment="#", encoding="latin-1")
+            eval_df = pd.read_csv(csv_path, skiprows=skiprows or None, encoding="latin-1", dtype=csv_dtypes)
 
         # Drop rows where every column is NaN (e.g. trailing blank lines in the CSV)
         eval_df = eval_df.dropna(how="all")
@@ -398,7 +453,7 @@ class HumanLabeledDataset:
             if len(harm_categories) > 1:
                 raise ValueError("Evaluating a dataset with multiple harm categories is not currently supported.")
 
-        elif self.metrics_type == MetricsType.OBJECTIVE:
+        else:
             for index, entry in enumerate(self.entries):
                 if not isinstance(entry, ObjectiveHumanLabeledEntry):
                     raise ValueError(
@@ -409,14 +464,14 @@ class HumanLabeledDataset:
     @classmethod
     def _validate_csv_columns(cls, *, eval_df: pd.DataFrame, metrics_type: MetricsType) -> None:
         """
-        Validate that the required standard columns exist in the DataFrame.
+        Validate required columns and binary labels for objective datasets.
 
         Args:
             eval_df (pd.DataFrame): The DataFrame to validate.
             metrics_type (MetricsType): The type of dataset (HARM or OBJECTIVE).
 
         Raises:
-            ValueError: If any required column is missing or if column names are not unique.
+            ValueError: If required columns are missing, names are not unique, or objective labels are not binary.
         """
         if len(eval_df.columns) != len(set(eval_df.columns)):
             raise ValueError("Column names in the dataset must be unique.")
@@ -451,6 +506,14 @@ class HumanLabeledDataset:
                     f"Human score column '{col}' contains {nan_count} NaN value(s). "
                     f"All human score cells must be filled."
                 )
+            if metrics_type == MetricsType.OBJECTIVE:
+                try:
+                    for score in eval_df[col]:
+                        cls._parse_objective_label(score)
+                except ValueError as error:
+                    raise ValueError(
+                        f"Human score column '{col}' must contain only binary values (0 or 1) for OBJECTIVE datasets."
+                    ) from error
 
     @staticmethod
     def _construct_harm_entry(*, messages: list[Message], harm: str, human_scores: list[Any]) -> HarmHumanLabeledEntry:
@@ -458,9 +521,21 @@ class HumanLabeledDataset:
         return HarmHumanLabeledEntry(messages, float_scores, harm)
 
     @staticmethod
+    def _parse_objective_label(score: object) -> bool:
+        normalized = str(score).strip().lower()
+        if normalized in ("true", "false"):
+            return normalized == "true"
+        try:
+            numeric_score = Decimal(normalized)
+        except InvalidOperation as error:
+            raise ValueError("Objective labels must be binary (0 or 1).") from error
+        if not numeric_score.is_finite() or numeric_score not in (0, 1):
+            raise ValueError("Objective labels must be binary (0 or 1).")
+        return bool(numeric_score)
+
+    @classmethod
     def _construct_objective_entry(
-        *, messages: list[Message], objective: str, human_scores: list[Any]
+        cls, *, messages: list[Message], objective: str, human_scores: list[Any]
     ) -> "ObjectiveHumanLabeledEntry":
-        # Convert scores to int before casting to bool in case the values (0, 1) are parsed as strings
-        bool_scores = [bool(int(score)) for score in human_scores]
+        bool_scores = [cls._parse_objective_label(score) for score in human_scores]
         return ObjectiveHumanLabeledEntry(messages, bool_scores, objective)

@@ -15,10 +15,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from pyrit.scenario.core.technique_requirements import IncompatibleTechniquePolicy
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from pyrit.models import AttackSeedGroup
+    from pyrit.converter import Converter
+    from pyrit.models import AttackSeedGroup, ScenarioRunPlan
     from pyrit.prompt_target import PromptTarget
     from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
     from pyrit.scenario.core.scenario_technique import ScenarioTechnique
@@ -41,9 +44,13 @@ class ScenarioContext:
         dataset_config (DatasetAttackConfiguration): The effective dataset configuration
             (caller-supplied or the scenario's default).
         memory_labels (dict[str, str]): Labels applied to every attack run.
+        technique_converters (dict[str, list[Converter]]): Additional request converters
+            for each technique, in application order.
         include_baseline (bool): Whether a baseline atomic attack should be emitted
             for this run, already resolved against the scenario's
             ``BASELINE_ATTACK_POLICY``.
+        incompatible_technique_policy (IncompatibleTechniquePolicy): Resolved action
+            for technique target or dataset incompatibility.
         seed_groups (Sequence[AttackSeedGroup]): The scenario's seed groups, resolved
             and sampled once by the base ``Scenario`` (flattened across datasets). Use
             these to build attacks so every atomic attack — and the baseline — draws from
@@ -51,6 +58,10 @@ class ScenarioContext:
         seed_groups_by_dataset (Mapping[str, list[AttackSeedGroup]]): The same resolved
             seed groups keyed by originating dataset name, for scenarios that map datasets
             onto separate attacks or display groups.
+        stored_run_plan (ScenarioRunPlan | None): The original plan on resume. Builders
+            with per-input choices restore them from this plan instead of selecting again.
+        scenario_result_id (str | None): The ``ScenarioResult`` id of this run: the stored id
+            on resume, or the id the new result will be created with on a fresh run.
     """
 
     objective_target: PromptTarget
@@ -58,5 +69,9 @@ class ScenarioContext:
     dataset_config: DatasetAttackConfiguration
     memory_labels: dict[str, str] = field(default_factory=dict)
     include_baseline: bool = False
+    incompatible_technique_policy: IncompatibleTechniquePolicy = IncompatibleTechniquePolicy.SKIP
     seed_groups: Sequence[AttackSeedGroup] = field(default_factory=tuple)
     seed_groups_by_dataset: Mapping[str, list[AttackSeedGroup]] = field(default_factory=dict)
+    stored_run_plan: ScenarioRunPlan | None = None
+    scenario_result_id: str | None = None
+    technique_converters: dict[str, list[Converter]] = field(default_factory=dict)

@@ -1,7 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-"""Default concrete implementations of the four GCG extension protocols.
+"""
+Default concrete implementations of the four GCG extension protocols.
 
 Each class in this module reproduces the byte-identical behavior of the
 legacy GCG attack code path it replaces:
@@ -32,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 
 class StandardGCGSampling:
-    """Top-k by ``-gradient``, uniform pick within top-k at one random position per row.
+    """
+    Top-k by ``-gradient``, uniform pick within top-k at one random position per row.
 
     The standard GCG sampling rule: for each of ``batch_size`` candidate
     rows, pick one of the ``control_length`` positions, then replace the
@@ -55,8 +57,10 @@ class StandardGCGSampling:
         temperature: float,
         allow_non_ascii: bool,
         non_ascii_tokens: torch.Tensor,
+        torch_generator: torch.Generator | None = None,
     ) -> torch.Tensor:
-        """Sample ``batch_size`` candidate suffix token sequences.
+        """
+        Sample ``batch_size`` candidate suffix token sequences.
 
         Args:
             gradient (torch.Tensor): Aggregated gradient over the control
@@ -76,6 +80,8 @@ class StandardGCGSampling:
                 the top-k.
             non_ascii_tokens (torch.Tensor): Token ids to exclude when
                 ``allow_non_ascii`` is False.
+            torch_generator (torch.Generator | None): Optional generator for
+                deterministic sampling.
 
         Returns:
             torch.Tensor: Candidate suffix token sequences with shape
@@ -96,13 +102,14 @@ class StandardGCGSampling:
         new_token_val = torch.gather(
             top_indices[new_token_pos],
             1,
-            torch.randint(0, top_k, (batch_size, 1), device=gradient.device),
+            torch.randint(0, top_k, (batch_size, 1), device=gradient.device, generator=torch_generator),
         )
         return original_control_tokens.scatter_(1, new_token_pos.unsqueeze(-1), new_token_val)
 
 
 class CrossEntropyLoss:
-    """Weighted token-level cross-entropy on the target and control slices.
+    """
+    Weighted token-level cross-entropy on the target and control slices.
 
     Per candidate: ``target_weight * CE(target_slice) + control_weight *
     CE(control_slice)``, where each cross-entropy term is reduced over its
@@ -124,7 +131,8 @@ class CrossEntropyLoss:
     """
 
     def __init__(self, *, target_weight: float = 1.0, control_weight: float = 0.0) -> None:
-        """Initialize the cross-entropy loss with target / control weights.
+        """
+        Initialize the cross-entropy loss with target / control weights.
 
         Args:
             target_weight (float): Weight on the target-slice cross-entropy.
@@ -156,7 +164,8 @@ class CrossEntropyLoss:
         target_slice: slice,
         control_slice: slice,
     ) -> torch.Tensor:
-        """Compute the per-candidate weighted cross-entropy loss.
+        """
+        Compute the per-candidate weighted cross-entropy loss.
 
         Args:
             logits (torch.Tensor): Model logits for the candidate batch
@@ -171,6 +180,9 @@ class CrossEntropyLoss:
         Returns:
             torch.Tensor: Per-candidate scalar loss with shape
             ``(batch_size,)``.
+
+        Raises:
+            RuntimeError: If the instance has no enabled loss term.
         """
         criterion = nn.CrossEntropyLoss(reduction="none")
         total: torch.Tensor | None = None
@@ -199,11 +211,109 @@ class CrossEntropyLoss:
                 "CrossEntropyLoss.compute_loss produced no terms; "
                 "this indicates a corrupted instance with both weights at 0."
             )
-        return total
+        result: torch.Tensor = total
+        return result
+
+    def get_required_logit_positions(
+        self,
+        *,
+        target_slice: slice,
+        control_slice: slice,
+        device: torch.device | str | None = None,
+    ) -> torch.Tensor:
+        """
+        Return sequence positions whose logits contribute to this loss.
+
+        Causal language-model logits at position ``n - 1`` predict the token
+        at position ``n``. Disabled loss terms are omitted entirely so models
+        supporting ``logits_to_keep`` need not project unused hidden states
+        through the vocabulary-sized LM head.
+
+        Args:
+            target_slice (slice): Target-token positions in the full sequence.
+            control_slice (slice): Control-token positions in the full sequence.
+            device (torch.device | str | None): Device on which to create the
+                returned index tensor.
+
+        Returns:
+            torch.Tensor: Ordered sequence positions required by the enabled
+                target and control loss terms.
+        """
+        positions: list[torch.Tensor] = []
+        if self._target_weight > 0:
+            positions.append(torch.arange(target_slice.start - 1, target_slice.stop - 1, device=device))
+        if self._control_weight > 0:
+            positions.append(torch.arange(control_slice.start - 1, control_slice.stop - 1, device=device))
+        return torch.cat(positions)
+
+    def compute_loss_from_selected_logits(
+        self,
+        *,
+        logits: torch.Tensor,
+        token_ids: torch.Tensor,
+        target_slice: slice,
+        control_slice: slice,
+    ) -> torch.Tensor:
+        """
+        Compute loss from logits ordered by ``get_required_logit_positions``.
+
+        Args:
+            logits (torch.Tensor): Selected logits with shape
+                ``(batch_size, required_positions, vocab_size)``.
+            token_ids (torch.Tensor): Full input token ids with shape
+                ``(batch_size, sequence_length)``.
+            target_slice (slice): Target-token positions in ``token_ids``.
+            control_slice (slice): Control-token positions in ``token_ids``.
+
+        Returns:
+            torch.Tensor: Per-candidate scalar loss with shape ``(batch_size,)``.
+
+        Raises:
+            ValueError: If the selected-logit count does not match the enabled
+                target and control terms.
+            RuntimeError: If both loss terms are unexpectedly disabled.
+        """
+        target_length = target_slice.stop - target_slice.start if self._target_weight > 0 else 0
+        control_length = control_slice.stop - control_slice.start if self._control_weight > 0 else 0
+        expected_length = target_length + control_length
+        if logits.shape[1] != expected_length:
+            raise ValueError(
+                "Selected logits must contain one position per enabled loss token; "
+                f"expected {expected_length}, got {logits.shape[1]}"
+            )
+
+        criterion = nn.CrossEntropyLoss(reduction="none")
+        total: torch.Tensor | None = None
+        offset = 0
+
+        if self._target_weight > 0:
+            target_term = criterion(
+                logits[:, offset : offset + target_length, :].transpose(1, 2),
+                token_ids[:, target_slice],
+            ).mean(dim=-1)
+            total = self._target_weight * target_term
+            offset += target_length
+
+        if self._control_weight > 0:
+            control_term = criterion(
+                logits[:, offset : offset + control_length, :].transpose(1, 2),
+                token_ids[:, control_slice],
+            ).mean(dim=-1)
+            weighted_control = self._control_weight * control_term
+            total = weighted_control if total is None else total + weighted_control
+
+        if total is None:
+            raise RuntimeError(
+                "CrossEntropyLoss.compute_loss_from_selected_logits produced no terms; "
+                "this indicates a corrupted instance with both weights at 0."
+            )
+        result: torch.Tensor = total
+        return result
 
 
 class LengthPreservingFilter:
-    """Decodes each candidate token row and drops any whose decoded string
+    """
+    Decodes each candidate token row and drops any whose decoded string
     either (a) equals ``current_control`` or (b) re-tokenizes to a different
     token count, padding dropped rows by repeating the last accepted
     candidate.
@@ -220,17 +330,31 @@ class LengthPreservingFilter:
     ``pyrit/executor/promptgen/gcg/attack/base/attack_manager.py``.
     """
 
-    def __init__(self, *, filter: bool = True) -> None:
-        """Initialize the filter.
+    def __init__(self, *, enabled: bool | None = None, **legacy_options: bool) -> None:
+        """
+        Initialize the filter.
 
         Args:
-            filter (bool): When True, drop candidates that equal
+            enabled (bool | None): When True, drop candidates that equal
                 ``current_control`` or re-tokenize to a different length,
                 padding the result with the last accepted candidate. When
                 False, decode every row and return them all unchanged.
-                Defaults to True.
+                Defaults to None, which enables filtering unless the legacy
+                ``filter`` option is supplied.
+            **legacy_options (bool): Supports the legacy ``filter`` keyword.
+
+        Raises:
+            TypeError: If both ``enabled`` and ``filter`` are provided or an
+                unknown option is provided.
         """
-        self._filter = filter
+        if "filter" in legacy_options:
+            if enabled is not None:
+                raise TypeError("Specify either 'enabled' or 'filter', not both")
+            enabled = legacy_options.pop("filter")
+        if legacy_options:
+            unexpected = next(iter(legacy_options))
+            raise TypeError(f"Unexpected LengthPreservingFilter option: {unexpected}")
+        self._filter = True if enabled is None else enabled
 
     def filter_candidates(
         self,
@@ -239,7 +363,8 @@ class LengthPreservingFilter:
         tokenizer: Any,
         current_control: str,
     ) -> list[str]:
-        """Decode and filter a batch of candidate suffix token tensors.
+        """
+        Decode and filter a batch of candidate suffix token tensors.
 
         Args:
             candidate_tokens (torch.Tensor): Sampled candidate suffixes
@@ -281,7 +406,8 @@ class LengthPreservingFilter:
 
 
 class LiteralStringInit:
-    """Returns the configured literal suffix verbatim; ignores the tokenizer.
+    """
+    Returns the configured literal suffix verbatim; ignores the tokenizer.
 
     Encapsulates the current ``control_init`` plumbing — a literal string
     threaded through ``AttackPrompt.__init__``, ``PromptManager.__init__``,
@@ -296,7 +422,8 @@ class LiteralStringInit:
     """
 
     def __init__(self, *, suffix: str) -> None:
-        """Initialize the literal-string suffix initializer.
+        """
+        Initialize the literal-string suffix initializer.
 
         Args:
             suffix (str): The literal suffix string to return on every
@@ -310,7 +437,8 @@ class LiteralStringInit:
         self._suffix = suffix
 
     def make_initial_suffix(self, *, tokenizer: Any) -> str:
-        """Return the configured suffix string.
+        """
+        Return the configured suffix string.
 
         Args:
             tokenizer (Any): Ignored. Present to match the protocol

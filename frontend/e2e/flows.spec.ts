@@ -6,9 +6,10 @@ import {
   type APIRequestContext,
   type Locator,
   type Page,
-} from "@playwright/test";
+} from "./_fixtures";
 
 import type { AddMessageResponse } from "@/types";
+import { compatibilityHeaders } from "./_compatibility";
 
 // ---------------------------------------------------------------------------
 // Mode detection
@@ -50,7 +51,7 @@ async function waitForBackend(request: APIRequestContext): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < maxWait) {
     try {
-      const resp = await request.get("/api/health");
+      const resp = await request.get("/api/health", { timeout: 2_000 });
       if (resp.ok()) return;
     } catch {
       // Backend not ready yet
@@ -68,6 +69,7 @@ async function createTarget(
   authMode: AuthMode = "api_key",
 ): Promise<string> {
   const resp = await request.post("/api/targets", {
+    headers: compatibilityHeaders(),
     data: { type: targetType, params, auth_mode: authMode },
   });
   expect(resp.ok()).toBeTruthy();
@@ -86,6 +88,7 @@ async function seedAttack(
   targetRegistryName: string,
 ): Promise<SeededAttack> {
   const resp = await request.post("/api/attacks", {
+    headers: compatibilityHeaders(),
     data: { target_registry_name: targetRegistryName },
   });
   expect(resp.status()).toBe(201);
@@ -118,7 +121,7 @@ async function storeMessage(
   };
   const resp = await request.post(
     `/api/attacks/${encodeURIComponent(attackResultId)}/messages`,
-    { data },
+    { data, headers: compatibilityHeaders() },
   );
   expect(resp.ok()).toBeTruthy();
 }
@@ -140,7 +143,7 @@ async function sendMessage(
   };
   const resp = await request.post(
     `/api/attacks/${encodeURIComponent(attackResultId)}/messages`,
-    { data },
+    { data, headers: compatibilityHeaders() },
   );
   expect(resp.ok()).toBeTruthy();
   const body: AddMessageResponse = await resp.json();
@@ -189,27 +192,25 @@ async function createConversation(
   }
   const resp = await request.post(
     `/api/attacks/${encodeURIComponent(attackResultId)}/conversations`,
-    { data },
+    { data, headers: compatibilityHeaders() },
   );
   expect(resp.status()).toBe(201);
   const body = await resp.json();
   return body.conversation_id;
 }
 
-/** Activate an exact target instance via the Configuration view. */
+/** Save an objective default and open a new chat with that target. */
 async function activateTarget(
   page: Page,
   targetRegistryName: string,
 ): Promise<void> {
-  await page.getByTitle("Configuration").click();
-  await expect(page.getByText("Target Configuration")).toBeVisible({ timeout: 10_000 });
+  await page.getByTitle("Registry").click();
+  await expect(page.getByText("Target Registry")).toBeVisible({ timeout: 10_000 });
   const row = page.getByTestId(`target-row-${targetRegistryName}`);
   await expect(row).toBeVisible({ timeout: 10_000 });
-  const setActiveButton = row.getByRole("button", { name: /set active/i });
-  if (await setActiveButton.isVisible()) {
-    await setActiveButton.click();
-  }
-  await page.getByTitle("Chat").click();
+  await page.getByRole("combobox", { name: "Default objective target", exact: true })
+    .selectOption(targetRegistryName);
+  await page.getByTitle("Technique.execute").click();
   await expect(page.getByTestId("new-attack-btn")).toBeVisible({ timeout: 5_000 });
 }
 
@@ -218,7 +219,7 @@ async function openAttackInHistory(
   page: Page,
   attackResultId: string,
 ): Promise<void> {
-  await page.getByTitle("Attack History").click();
+  await page.getByTitle("History").click();
   await expect(page.getByTestId("attacks-table")).toBeVisible({
     timeout: 10_000,
   });
@@ -528,6 +529,8 @@ async function assertLiveAssistant(
   exp: TargetVariant["expectAssistantLive"],
 ): Promise<void> {
   const assistantBubble = page.getByTestId("message-bubble-1");
+  await expect(assistantBubble).toBeVisible({ timeout: 90_000 });
+
   if (exp.hasText) {
     await expect(assistantBubble).toContainText(/\S/, { timeout: 90_000 });
   }
@@ -791,6 +794,7 @@ for (const variant of TARGET_VARIANTS) {
           async () => {
             const resp = await request.get(
               `/api/attacks/${encodeURIComponent(attackResultId)}/conversations`,
+              { headers: compatibilityHeaders() },
             );
             const data = await resp.json();
             return data.main_conversation_id;
@@ -825,7 +829,7 @@ for (const variant of TARGET_VARIANTS) {
       );
 
       if (variant.multiTurn) {
-        // Multi-turn: branch via the UI button
+        // Multi-turn: branch via the copy menu.
         await openAttackInHistory(page, attackResultId);
 
         const expText = variant.expectAssistantSeeded.text;
@@ -837,16 +841,22 @@ for (const variant of TARGET_VARIANTS) {
           await page.waitForTimeout(3_000);
         }
 
-        const branchBtn = page.getByTestId("branch-conv-btn-1");
-        await expect(branchBtn).toBeVisible({ timeout: 5_000 });
-        await branchBtn.click();
+        await page.getByTestId("copy-to-input-btn-1").click();
+        await page.getByRole("menuitem", { name: "Branch conversation", exact: true }).click();
       } else {
-        // Single-turn targets disable branch buttons in the UI.
-        // Branch via the API instead to test the backend operation.
-        await createConversation(request, attackResultId, {
-          sourceConversationId: conversationId,
-          cutoffIndex: 1,
+        await openAttackInHistory(page, attackResultId);
+        await page.getByTestId("copy-to-input-btn-1").click();
+        await expect(page.getByRole("menuitem", { name: "Branch conversation", exact: true })).toBeDisabled();
+        const rejected = await request.post(`/api/attacks/${encodeURIComponent(attackResultId)}/conversations`, {
+          headers: compatibilityHeaders(),
+          data: { source_conversation_id: conversationId, cutoff_index: 1 },
         });
+        expect(rejected.status()).toBe(400);
+        const listing = await request.get(`/api/attacks/${encodeURIComponent(attackResultId)}/conversations`, {
+          headers: compatibilityHeaders(),
+        });
+        expect((await listing.json()).conversations).toHaveLength(1);
+        return;
       }
 
       await expect
@@ -854,6 +864,7 @@ for (const variant of TARGET_VARIANTS) {
           async () => {
             const resp = await request.get(
               `/api/attacks/${encodeURIComponent(attackResultId)}/conversations`,
+              { headers: compatibilityHeaders() },
             );
             return (await resp.json()).conversations.length;
           },
@@ -863,13 +874,21 @@ for (const variant of TARGET_VARIANTS) {
 
       const convResp = await request.get(
         `/api/attacks/${encodeURIComponent(attackResultId)}/conversations`,
+        { headers: compatibilityHeaders() },
       );
       const convData = await convResp.json();
       const branchConv = convData.conversations.find(
         (c: { conversation_id: string }) => c.conversation_id !== convData.main_conversation_id,
       );
       expect(branchConv).toBeDefined();
-      expect(branchConv.message_count).toBeGreaterThanOrEqual(2);
+      expect(branchConv.message_count).toBe(2);
+      const messagesResponse = await request.get(
+        `/api/attacks/${encodeURIComponent(attackResultId)}/messages?conversation_id=${encodeURIComponent(branchConv.conversation_id)}`,
+        { headers: compatibilityHeaders() },
+      );
+      expect(messagesResponse.ok()).toBeTruthy();
+      expect((await messagesResponse.json()).messages.map((message: { role: string }) => message.role))
+        .toEqual(["user", "simulated_assistant"]);
     });
 
     test("should show correct message counts @seeded", async ({
@@ -937,11 +956,11 @@ for (const variant of TARGET_VARIANTS) {
         await page.waitForTimeout(3_000);
       }
 
-      // Branch via API (UI branch button is disabled for single-turn targets)
+      // Targets without replay support can create an empty conversation, not a history copy.
       const branchConversationId = await createConversation(
         request,
         attackResultId,
-        { sourceConversationId: conversationId, cutoffIndex: 1 },
+        variant.multiTurn ? { sourceConversationId: conversationId, cutoffIndex: 1 } : undefined,
       );
 
       await openConversationPanel(page);
@@ -966,6 +985,7 @@ for (const variant of TARGET_VARIANTS) {
           async () => {
             const resp = await request.get(
               `/api/attacks/${encodeURIComponent(attackResultId)}/conversations`,
+              { headers: compatibilityHeaders() },
             );
             const data = await resp.json();
             return data.main_conversation_id;
@@ -985,7 +1005,8 @@ for (const variant of TARGET_VARIANTS) {
 
     let targetRegistryName: string;
 
-    test.beforeAll(async ({ request }) => {
+    test.beforeAll(async ({ request }, testInfo) => {
+      testInfo.setTimeout(120_000);
       if (!hasLiveConfiguration(variant)) return;
       await waitForBackend(request);
       targetRegistryName = await createTarget(
@@ -1084,6 +1105,7 @@ for (const variant of TARGET_VARIANTS) {
           async () => {
             const resp = await request.get(
               `/api/attacks/${encodeURIComponent(attackResultId)}/conversations`,
+              { headers: compatibilityHeaders() },
             );
             return (await resp.json()).conversations.length;
           },
@@ -1162,6 +1184,7 @@ for (const variant of TARGET_VARIANTS) {
           async () => {
             const resp = await request.get(
               `/api/attacks/${encodeURIComponent(attackResultId)}/conversations`,
+              { headers: compatibilityHeaders() },
             );
             const data = await resp.json();
             return data.main_conversation_id;

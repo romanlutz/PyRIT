@@ -1,8 +1,37 @@
+import type { Theme } from '@fluentui/react-components'
+
+import type { THEME_PRESETS } from '@/themes/themePresets'
+
 // ============================================================================
 // Frontend UI Types
 // ============================================================================
 
+export type ThemeMode = 'system' | keyof typeof THEME_PRESETS
+
+export type ResolvedTheme = 'light' | 'dark' | 'high-contrast'
+
+export interface ThemeBackground {
+  readonly imageUrl: string
+  readonly opacity: number
+}
+
+export interface ThemePreset {
+  readonly label: string
+  readonly resolved: 'light' | 'dark'
+  readonly theme: Theme
+  readonly background?: ThemeBackground
+}
+
+export interface ThemeContextValue {
+  readonly mode: ThemeMode
+  readonly resolved: ResolvedTheme
+  readonly background?: ThemeBackground
+  readonly setMode: (mode: ThemeMode) => void
+}
+
 export interface MessageAttachment {
+  /** Client-side identity of one attachment in the editable draft. */
+  draftId?: string
   type: 'image' | 'audio' | 'video' | 'file'
   name: string
   url: string
@@ -14,17 +43,196 @@ export interface MessageAttachment {
    */
   size?: number
   file?: File
+  /** Raw backend value used when reconstructing a persisted attachment for resubmission. */
+  sourceValue?: string
+  /** Backend data type paired with sourceValue so persisted attachments retain their original semantics. */
+  sourceDataType?: string
   /** Backend piece ID — preserved so remix/copy can trace back to the original piece */
   pieceId?: string
   /** Backend prompt_metadata — preserved so video_id etc. carry over on remix/copy */
   metadata?: Record<string, unknown>
 }
 
+export interface ConverterInputPiece {
+  id: string
+  pieceType: string
+  name: string
+  dataType: string
+  value: string
+  file?: File
+}
+
+export interface PieceConversion {
+  manuallyEdited?: boolean
+  pieceId: string
+  pieceType: string
+  converterInstanceIds: string[]
+  converterProvenance?: Array<string | null>
+  convertedValue: string
+  originalValue: string
+  convertedDataType: string
+}
+
+/** Only touched pieces are present; null explicitly clears a stale conversion. */
+export type PieceConversionUpdates = Record<string, PieceConversion | null>
+
+export interface ConverterPipelineStage {
+  readonly id: string
+  readonly converterId: string
+  readonly temporary?: SourceInstanceSpec
+  readonly identifier?: ConverterIdentifier
+}
+
+export interface ConverterStageResult {
+  readonly stageId: string
+  readonly generated: ConverterPreviewStep
+  value: string
+}
+
+export interface ChatConverterSnapshot {
+  generation: string
+  workingInputs: Record<string, string>
+  pipelines: Record<string, ConverterPipelineStage[]>
+  stageResults: Record<string, ConverterStageResult[]>
+  errors: Record<string, string>
+  applied: Record<string, PieceConversion>
+}
+
+export interface ChatDraftContent {
+  text: string
+  attachments: MessageAttachment[]
+  systemPrompt?: string
+  target?: TargetReference | null
+  converters?: ChatConverterSnapshot
+  textMetadata?: Record<string, unknown>
+}
+
+export interface ChatDraftContextState {
+  originatingAttackId: string | null
+  originatingConversationId: string | null
+  originatingPath: string
+  originatingState?: unknown
+  draft: ChatDraftContent
+  savedAt: number
+  sequence: number
+}
+
+export type ImportDestinationType = 'new_attack' | 'current_conversation' | 'new_conversation' | 'any'
+
+export interface PendingImportPayload {
+  id: string
+  sequence: number
+  destinationType: ImportDestinationType
+  targetAttackId?: string | null
+  targetConversationId?: string | null
+  content: {
+    text: string
+    attachments?: MessageAttachment[]
+    textMetadata?: Record<string, unknown>
+  }
+  replaceDirty?: boolean
+  focus?: boolean
+  stagedAt: number
+}
+
+export interface ChatDraftHandoffContextValue {
+  preservedDraft: ChatDraftContextState | null
+  pendingImport: PendingImportPayload | null
+  activeSequence: number
+  preserveDraft: (state: Omit<ChatDraftContextState, 'savedAt' | 'sequence'>) => void
+  clearPreservedDraft: (expectedSequence?: number) => void
+  /** Pass the sequence captured before preparing an import to reject stale async results. */
+  stagePendingImport: (
+    payload: Omit<PendingImportPayload, 'id' | 'sequence' | 'stagedAt'>,
+    expectedSequence?: number,
+  ) => PendingImportPayload | null
+  consumePendingImport: (
+    id?: string,
+    currentAttackId?: string | null,
+    currentConversationId?: string | null,
+  ) => PendingImportPayload | null
+  dismissPendingImport: (id?: string) => void
+  consumePreservedDraft: (
+    currentAttackId: string | null,
+    currentConversationId?: string | null,
+    expectedSequence?: number,
+  ) => ChatDraftContent | null
+  isDraftDirty: (draft?: Partial<ChatDraftContent> | null) => boolean
+}
+
+export interface UndoLastSendAction {
+  readonly disabledReason?: string
+  readonly isUndoing: boolean
+  readonly onUndo: () => void
+}
+
+export interface ChatConverterController {
+  readonly repeatDisabledReason?: string
+  readonly editRevision: number
+  inputs: ConverterInputPiece[]
+  workingInputs: Record<string, string>
+  pipelines: Record<string, ConverterPipelineStage[]>
+  stageResults: Record<string, ConverterStageResult[]>
+  results: Record<string, ConverterPreviewResponse>
+  errors: Record<string, string>
+  applied: Record<string, PieceConversion>
+  isConverting: boolean
+  addConverter: (pieceType: string, converterId: string) => void
+  setPipeline: (pieceType: string, update: (stages: ConverterPipelineStage[]) => ConverterPipelineStage[]) => void
+  retainConverters: (availableIds: Set<string>) => void
+  discardTemporarySettings?: () => void
+  convert: (pieceType: string) => Promise<PieceConversionUpdates | void>
+  convertRemaining: (pieceId: string, stageId: string) => Promise<PieceConversionUpdates | void>
+  editInput: (pieceId: string, value: string) => PieceConversionUpdates | void
+  editStageOutput: (pieceId: string, stageId: string, value: string) => PieceConversionUpdates | void
+  apply: () => void
+  clear: (pieceId: string) => void
+  clearAll: () => void
+  editConvertedValue: (pieceId: string, value: string) => void
+  restore: (
+    text: string, attachments: MessageAttachment[], conversions: Record<string, PieceConversion>,
+    pipelines?: Record<string, ConverterPipelineStage[]>,
+  ) => void
+  snapshot: () => ChatConverterSnapshot
+  restoreSnapshot: (snapshot: ChatConverterSnapshot, text: string, attachments: MessageAttachment[]) => void
+}
+
+export interface MessageTextDisplayPiece {
+  type: 'text'
+  pieceId: string
+  pieceIndex: number
+  content: string
+  scores?: DisplayScore[]
+}
+
+export interface MessageMediaDisplayPiece {
+  type: 'media'
+  pieceId: string
+  pieceIndex: number
+  /**
+   * Renderable media for this piece. Absent when the backend piece carries no
+   * usable media value (e.g. an empty or blocked response) but still has
+   * scores to present — such pieces must never enter copy/download/export
+   * paths, so they deliberately have no attachment.
+   */
+  attachment?: MessageAttachment
+  scores?: DisplayScore[]
+}
+
+export type MessageDisplayPiece = MessageTextDisplayPiece | MessageMediaDisplayPiece
+
 export interface Message {
-  role: 'user' | 'assistant' | 'simulated_assistant' | 'system'
+  role: 'user' | 'assistant' | 'simulated_assistant' | 'tool' | 'simulated_tool' | 'system' | 'developer'
   content: string
   timestamp: string
+  /**
+   * Legacy scores for messages created directly by the frontend. Backend
+   * messages keep scores on their corresponding `displayPieces` entry.
+   */
+  scores?: DisplayScore[]
   attachments?: MessageAttachment[]
+  /** Converted text and media pieces in backend order, with piece-local scores. */
+  displayPieces?: MessageDisplayPiece[]
   /** If the backend returned an error for this message */
   error?: MessageError
   /** True while waiting for the backend response */
@@ -45,6 +253,17 @@ export interface MessageError {
   description?: string
 }
 
+export interface ChatSendOutcome {
+  status: 'sent' | 'retryable_failure' | 'non_retryable_failure'
+  clearDraft: boolean
+}
+
+/** A filter choice: the value it selects and the text shown for it. */
+export interface FilterOption {
+  value: string
+  label: string
+}
+
 // ============================================================================
 // Backend DTO Types (mirror pyrit/backend/models)
 // ============================================================================
@@ -56,7 +275,100 @@ export interface PaginationInfo {
   prev_cursor?: string | null
 }
 
+export interface ConfigurationFileContent {
+  content: string
+  source: string
+  version: string
+  live_reinitialization_enabled: boolean
+}
+
+export interface UpdateConfigurationFileRequest {
+  content: string
+  version: string
+}
+
+export interface UpdateEnvironmentFileRequest {
+  content: string
+  version: string
+}
+
+export interface EnvironmentFileContent {
+  id: string
+  name: string
+  path: string
+  content: string
+  exists: boolean
+  version?: string | null
+  read_only?: boolean
+  read_only_reason?: string | null
+}
+
+export interface AuthAccess {
+  isAdmin: boolean
+}
+
+export interface EnvironmentFileListResponse {
+  items: EnvironmentFileContent[]
+}
+
 // --- Targets ---
+
+export interface TargetReference {
+  readonly registryName: string
+  readonly identifierHash: string
+}
+
+export interface TargetPreferences {
+  readonly objective: TargetReference | null
+  readonly adversarial: TargetReference | null
+}
+
+/** A saved Operation, or a name kept from before Operations were saved records. */
+export type OperationSelection = { readonly id: string } | { readonly name: string }
+
+export interface UserPreferences {
+  readonly targets: TargetPreferences
+  readonly hiddenTargetRegistryNames: string[]
+  readonly labels: Record<string, string | null>
+  /** Omitted to use the server default; null when the user cleared the selection. */
+  readonly operation?: OperationSelection | null
+  readonly theme: ThemeMode
+  readonly chatMarkdown: boolean
+  readonly chatScorer?: RegisteredComponentReference | null
+}
+
+export interface RegisteredComponentReference {
+  readonly registry_name: string
+  readonly identifier_hash: string
+}
+
+export interface ScorerInstance {
+  scorer_registry_name: string
+  identifier: ComponentIdentifier & { scorer_type?: string | null }
+  description?: string | null
+  display_type?: string | null
+  scorable_types?: string[]
+  condition_types?: string[]
+  evaluation_identifier?: ComponentIdentifier | null
+  metrics?: ScorerEvaluationMetrics | null
+  chat_scoring_disabled_reason?: string | null
+}
+
+export type ScorerEvaluationMetrics = Record<string, number | string | null | undefined>
+
+export interface ScoringFailure {
+  scorer: RegisteredComponentReference
+  objective: string
+  response_id: string
+  conversation_id: string
+  error: string
+}
+
+export interface ManualContinuation {
+  source_attack_result_id: string
+  source_conversation_id: string
+  source_response_id?: string | null
+}
 
 export interface TargetCapabilities {
   supports_multi_turn: boolean
@@ -88,9 +400,15 @@ export interface TargetIdentifier {
 
 export interface TargetInstance {
   target_registry_name: string
+  reconstructable?: boolean
+  reconstruction_error?: string | null
+  supports_temperature_override?: boolean
+  binding?: TargetBinding
   /** Typed identity: class name, endpoint, model name, generation params, content hash. */
   identifier: TargetIdentifier
   capabilities?: TargetCapabilities | null
+  /** Effective replay support, including configured adapters and provider restoration. */
+  supports_history_replay?: boolean
   /** Non-promoted constructor params, curated for display (e.g., RoundRobin weights). */
   target_specific_params?: Record<string, unknown> | null
   /** Inner targets for composite targets like RoundRobinTarget. */
@@ -108,6 +426,49 @@ export interface CreateTargetRequest {
   auth_mode?: 'api_key' | 'identity'
 }
 
+// --- Initializers ---
+
+export interface RegisteredInitializer {
+  initializer_name: string
+  initializer_type: string
+  description: string
+  required_env_vars: string[]
+  supported_parameters: Parameter[]
+}
+
+/** A read-only initializer invocation from the active `.pyrit_conf`. */
+export interface ConfiguredInitializerSetting {
+  initializer_name: string
+  parameters?: Record<string, unknown> | null
+  order_index: number
+}
+
+export interface InitializerSettingsResponse {
+  /** Read-only initializers from the active `.pyrit_conf`, in run order. */
+  configured: ConfiguredInitializerSetting[]
+}
+
+export interface ListRegisteredInitializersResponse {
+  items: RegisteredInitializer[]
+  pagination: PaginationInfo
+}
+
+export interface RegisterInitializerRequest {
+  name: string
+  script_content: string
+}
+
+export interface CustomInitializer {
+  initializer_name: string
+  script_content: string
+  source: string
+}
+
+export interface CustomInitializerListResponse {
+  source: string
+  items: CustomInitializer[]
+}
+
 // --- Converters ---
 
 export interface ConverterIdentifier {
@@ -122,25 +483,174 @@ export interface ConverterIdentifier {
 }
 
 export interface ConverterInstance {
+  parameters?: Parameter[]
   converter_id: string
+  reconstructable?: boolean
+  reconstruction_error?: string | null
   identifier: ConverterIdentifier
+  is_llm_based?: boolean
+  description?: string | null
 }
 
 export interface ConverterListResponse {
   items: ConverterInstance[]
 }
 
+export interface CreateConverterRequest {
+  name: string
+  type: string
+  params?: Record<string, unknown>
+}
+
+export interface SourceInstanceSpec {
+  source_name: string
+  source_hash: string
+  params: Record<string, unknown>
+  effective_hash?: string
+}
+
+export type ConverterSelection = string | SourceInstanceSpec
+
+export interface TargetBinding {
+  version: 1
+  source_name: string
+  source_hash: string
+  temperature: number
+  effective_hash: string
+}
+
+export interface UnregisteredTarget {
+  identifier: TargetIdentifier
+  capabilities: TargetCapabilities
+}
+
+export interface UnregisteredConverter {
+  identifier: ConverterIdentifier
+}
+
+export interface TechniqueInstance {
+  name: string
+  description?: string | null
+  attack_type: string
+  tags: string[]
+  uses_adversarial: boolean
+  uses_default_adversarial_target: boolean
+  /** Supplied factory creation inputs, with live component credentials omitted. */
+  creation_statement: string
+}
+
+export interface TechniqueTypeEntry {
+  attack_type: string
+  description: string
+  parameters: Parameter[]
+  supports_adversarial: boolean
+  supports_converters: boolean
+}
+
+export interface TechniqueListResponse {
+  items: TechniqueInstance[]
+  pagination: PaginationInfo
+}
+
+export interface TechniqueTypeResponse {
+  items: TechniqueTypeEntry[]
+}
+
+export interface CreateTechniqueRequest {
+  name: string
+  description?: string
+  tags: string[]
+  type: string
+  params: Record<string, unknown>
+  request_converters?: string[]
+  response_converters?: string[]
+  adversarial_chat?: string
+  adversarial_system_prompt?: string
+  adversarial_seed_prompt?: string
+  adversarial_prompt_template?: string
+}
+
+export interface SimulationSettings {
+  num_turns?: number | null
+  adversarial_chat_system_prompt?: string | null
+  simulated_target_system_prompt?: string | null
+  next_message_system_prompt?: string | null
+  final_user_message?: string | null
+}
+
+export type SimulationChanges = Partial<SimulationSettings>
+
+interface TechniqueSettingFields {
+  description?: string | null
+  params?: Record<string, unknown>
+  request_converters?: ConverterSelection[] | null
+  response_converters?: ConverterSelection[] | null
+  adversarial_chat?: string | null
+  adversarial_system_prompt?: string | null
+  adversarial_seed_prompt?: string | null
+  adversarial_prompt_template?: string | null
+}
+
+export interface TechniqueSettings extends TechniqueSettingFields {
+  simulation?: SimulationSettings | null
+}
+
+export interface TechniqueChanges extends TechniqueSettingFields {
+  simulation?: SimulationChanges | null
+}
+
+export interface TechniqueOverride {
+  source_name: string
+  source_identity: string
+  changes: TechniqueChanges
+  dependencies: Record<string, string>
+  effective_identity?: string | null
+}
+
+export interface TechniqueConfiguration {
+  source_name: string
+  source_identity: string
+  attack_type: string
+  settings: TechniqueSettings
+  parameters: Parameter[]
+  editable_fields: string[]
+  supplied_parameters: string[]
+  read_only: Record<string, string>
+  supports_prepended_conversation: boolean
+  supports_prompt?: boolean
+}
+
+export interface TechniqueEditResponse {
+  configuration: TechniqueConfiguration
+  override: TechniqueOverride
+}
+
+export interface RegistryReferenceOption {
+  name: string
+  type: string
+}
+
 export interface Parameter {
   name: string
   type_name: string
   required: boolean
-  default?: string | null
+  /** Scalar default renders as a display string; a list default renders as a list of display strings. */
+  default?: string | string[] | null
   choices?: string[] | null
   is_list?: boolean
+  /** Structured input variants mapped to their constructor parameters. */
+  variants?: Record<string, Parameter[]> | null
+  reference_type?: 'target' | 'converter' | 'scorer' | 'scenario' | null
+  /** Whether parameter controls must obscure the entered value. */
+  sensitive?: boolean
+  /** Whether parameter controls must preserve line breaks in the entered value. */
+  multiline?: boolean
+  /** Whether the value must be omitted when identity-based authentication is selected. */
+  identity_conflicting?: boolean
   description?: string | null
 }
 
-export interface ConverterCatalogEntry {
+export interface ConverterTypeEntry {
   converter_type: string
   supported_input_types: string[]
   supported_output_types: string[]
@@ -149,27 +659,258 @@ export interface ConverterCatalogEntry {
   description?: string | null
 }
 
-export interface ConverterCatalogResponse {
-  items: ConverterCatalogEntry[]
+export interface ConverterTypeListResponse {
+  items: ConverterTypeEntry[]
 }
 
-export interface TargetCatalogEntry {
+export interface ConverterPreviewRequest {
+  original_value: string
+  converter_ids: string[]
+  converter_specs?: Array<SourceInstanceSpec | null>
+  original_value_data_type?: string
+  start_token?: string
+  end_token?: string
+}
+
+/** One converter stage of a `/converters/preview` pipeline run. */
+export interface ConverterPreviewStep {  converter_id: string
+  converter_type: string
+  input_value: string
+  input_data_type: string
+  output_value: string
+  output_data_type: string
+  source?: SourceInstanceSpec | null
+  identifier?: ConverterIdentifier | null
+  provenance?: string | null
+}
+
+export interface ConverterPreviewResponse {
+  original_value: string
+  original_value_data_type: string
+  converted_value: string
+  converted_value_data_type: string
+  steps: ConverterPreviewStep[]
+}
+
+export interface TargetTypeEntry {
   target_type: string
   parameters: Parameter[]
   supported_auth_modes: ('api_key' | 'identity')[]
   description?: string | null
 }
 
-export interface TargetCatalogResponse {
-  items: TargetCatalogEntry[]
+export interface TargetTypeListResponse {
+  items: TargetTypeEntry[]
 }
 
 // --- Attacks ---
 
 export interface TargetInfo {
   target_type: string
+  target_registry_name?: string | null
   endpoint?: string | null
   model_name?: string | null
+  identifier_hash: string
+  binding?: TargetBinding | null
+}
+
+export type AttackTargetResolutionStatus =
+  | 'idle'
+  | 'unbound'
+  | 'loading'
+  | 'resolved'
+  | 'explicit-mismatch'
+  | 'unavailable'
+  | 'ambiguous'
+  | 'error'
+  | 'legacy'
+
+export type AttackOutcome = 'undetermined' | 'success' | 'failure' | 'error'
+
+// Wire contracts from pyrit.models.analytics. The SDK selects and counts the cohort.
+export type AttackAnalyticsDimensionName =
+  | 'operation'
+  | 'operator'
+  | 'targeted_harm_category'
+  | 'attack_type'
+  | 'converter_type'
+  | 'objective_target'
+  | 'model'
+  | 'scenario'
+  | 'label'
+
+export type AttackAnalyticsConverterDirection = 'request' | 'response'
+export type AttackAnalyticsMatchMode = 'any' | 'all'
+
+export type AttackAnalyticsDimension =
+  | {
+      readonly name: 'label'
+      readonly label_key: string
+      readonly converter_direction?: 'request'
+    }
+  | {
+      readonly name: 'converter_type'
+      readonly label_key?: null
+      readonly converter_direction?: AttackAnalyticsConverterDirection
+    }
+  | {
+      readonly name: Exclude<AttackAnalyticsDimensionName, 'label' | 'converter_type'>
+      readonly label_key?: null
+      readonly converter_direction?: 'request'
+    }
+
+/**
+ * Absence keys cannot collide with literal values such as "Unknown" or "No converters".
+ * Operation `value` keys are saved Operation IDs; `legacy_operation_name` keys are
+ * names stored without an Operation ID and apply only to the Operation dimension.
+ */
+export type AttackAnalyticsValue =
+  | { readonly kind: 'value' | 'legacy_operation_name'; readonly value: string }
+  | { readonly kind: 'missing' | 'no_converters'; readonly value: null }
+
+export interface AttackAnalyticsFilter {
+  readonly dimension: AttackAnalyticsDimension
+  readonly values: AttackAnalyticsValue[]
+  readonly match_mode: AttackAnalyticsMatchMode
+}
+
+/** Separate predicates are ANDed, including repeated dimensions. Bounds are [after, before). */
+export interface AttackAnalyticsFilters {
+  readonly dimensions: AttackAnalyticsFilter[]
+  readonly outcomes: AttackOutcome[]
+  readonly updated_after?: string | null
+  readonly updated_before?: string | null
+}
+
+/** SDK-computed proportions in [0, 1]. A null rate has no available denominator. */
+export interface OutcomeStatistics {
+  readonly success_rate: number | null
+  /** Serialized read-only alias of success_rate, not a separately calculated value. */
+  readonly success_rate_decided: number | null
+  readonly success_rate_all: number | null
+  readonly total_decided: number
+  readonly successes: number
+  readonly failures: number
+  readonly undetermined: number
+  readonly errors: number
+  readonly total_results: number
+  readonly decided_share: number | null
+  readonly outcome_shares: Readonly<Record<AttackOutcome, number>>
+}
+
+export type AttackAnalyticsStatistics = OutcomeStatistics
+
+export interface AttackAnalyticsQuery {
+  readonly filters?: AttackAnalyticsFilters
+  readonly group_by?: AttackAnalyticsDimension
+  readonly compare_by?: AttackAnalyticsDimension | null
+  readonly group_limit?: number
+  readonly group_offset?: number
+  readonly axis_limit?: number
+  readonly result_limit?: number
+}
+
+export interface AttackAnalyticsResultsQuery {
+  readonly filters?: AttackAnalyticsFilters
+  readonly cursor?: string | null
+  readonly limit?: number
+}
+
+/** The SDK excludes this exact dimension's predicates, keeping all other filters. */
+export interface AttackAnalyticsFacetQuery {
+  readonly dimension: AttackAnalyticsDimension
+  readonly filters?: AttackAnalyticsFilters
+  readonly search?: string
+  readonly offset?: number
+  readonly limit?: number
+}
+
+export interface AttackAnalyticsOption {
+  readonly key: AttackAnalyticsValue
+  /** Presentation only. Saved target keys are behavioral hashes; scenario keys are saved run IDs. */
+  readonly label: string
+}
+
+export interface AttackAnalyticsGroup extends AttackAnalyticsOption {
+  readonly statistics: OutcomeStatistics
+  readonly drilldown_filters: AttackAnalyticsFilter[]
+}
+
+export interface AttackAnalyticsCell {
+  readonly row: AttackAnalyticsValue
+  readonly column: AttackAnalyticsValue
+  readonly statistics: OutcomeStatistics
+  readonly drilldown_filters: AttackAnalyticsFilter[]
+}
+
+export interface AttackAnalyticsResultRow {
+  readonly attack_result_id: string
+  readonly objective_preview: string
+  readonly outcome: AttackOutcome
+  readonly updated_at: string
+  readonly operation: string | null
+  /** Lowercase saved Operation ID. Null with a non-null `operation` marks legacy activity saved with only a name. */
+  readonly operation_id: string | null
+  readonly operator: string | null
+  readonly attack_type: string | null
+  readonly target_model: string | null
+  /** Content hash for inspection, not the behavioral key used by target filters. */
+  readonly target_identifier_hash: string | null
+  readonly scenario_result_id: string | null
+  readonly targeted_harm_categories: string[]
+  readonly request_converters: string[]
+  readonly response_converters: string[]
+  readonly labels: Record<string, string>
+}
+
+export interface AttackAnalyticsResults {
+  readonly items: AttackAnalyticsResultRow[]
+  readonly has_more: boolean
+  readonly next_cursor: string | null
+  readonly computed_at: string
+}
+
+export interface AttackAnalyticsFacets {
+  readonly items: AttackAnalyticsOption[]
+  readonly has_more: boolean
+  readonly next_offset: number | null
+  readonly computed_at: string
+}
+
+/** Later result-page reads must not replace the report or advance its freshness. */
+export interface AttackAnalyticsReport {
+  readonly filters: AttackAnalyticsFilters
+  readonly group_by: AttackAnalyticsDimension
+  readonly compare_by: AttackAnalyticsDimension | null
+  readonly summary: OutcomeStatistics
+  readonly outcome_filter_applied: boolean
+  readonly groups_overlap: boolean
+  readonly drilldown_unavailable_reason: string | null
+  readonly groups: AttackAnalyticsGroup[]
+  readonly has_more_groups: boolean
+  readonly next_group_offset: number | null
+  readonly rows: AttackAnalyticsOption[]
+  readonly columns: AttackAnalyticsOption[]
+  readonly cells: AttackAnalyticsCell[]
+  readonly axes_truncated: boolean
+  readonly results: AttackAnalyticsResults
+  readonly computed_at: string
+  readonly warnings: string[]
+}
+
+export type AttackAnalyticsChart = 'outcomes' | 'success-rate' | 'heatmap'
+export type AttackAnalyticsHeatmapMetric = 'success_rate' | 'total_results'
+export type AttackAnalyticsDenominator = 'decided' | 'all'
+
+/** Browser presentation state. Inactive axes and denominator choices do not affect API requests. */
+export interface AttackAnalyticsViewState {
+  readonly filters: AttackAnalyticsFilters
+  readonly groupBy: AttackAnalyticsDimension
+  readonly heatmapRow: AttackAnalyticsDimension
+  readonly heatmapColumn: AttackAnalyticsDimension
+  readonly chart: AttackAnalyticsChart
+  readonly heatmapMetric: AttackAnalyticsHeatmapMetric
+  readonly denominator: AttackAnalyticsDenominator
 }
 
 export interface AttackSummary {
@@ -177,25 +918,118 @@ export interface AttackSummary {
   conversation_id: string
   attack_type: string
   attack_specific_params?: Record<string, unknown> | null
+  objective: string
   target?: TargetInfo | null
+  target_unbound?: boolean
   converters: string[]
-  outcome?: 'undetermined' | 'success' | 'failure' | 'error' | null
+  outcome?: AttackOutcome | null
+  automated_score?: BackendScore | null
+  human_score?: BackendScore | null
+  chat_scorer?: RegisteredComponentReference | null
+  chat_scorer_inherited?: boolean
+  execution_read_only?: boolean
+  manual_continuation?: ManualContinuation | null
+  last_score?: BackendScore | null
+  last_response?: BackendMessagePiece | null
   last_message_preview?: string | null
   message_count: number
   related_conversation_ids: string[]
+  operator?: string | null
+  operation?: string | null
+  operation_id?: string | null
+  /** The saved Operation's current name, or the historical name of legacy activity. */
+  operation_name?: string | null
+  related_conversations?: Array<{
+    conversation_id: string
+    conversation_type: 'adversarial' | 'preparation' | 'pruned' | 'score' | 'converter'
+    description?: string | null
+  }>
   labels: Record<string, string>
   created_at: string
   updated_at: string
 }
 
 export interface CreateAttackRequest {
-  target_registry_name: string
+  target_registry_name?: string
+  target_binding?: TargetBinding
   name?: string
+  chat_scorer?: RegisteredComponentReference | null
+  operator?: string
+  operation_id?: string
   labels?: Record<string, string>
   source_conversation_id?: string
   cutoff_index?: number
   system_prompt?: string
   prepended_conversation?: PrependedMessageRequest[]
+}
+
+export interface UpdateAttackRequest {
+  outcome?: 'undetermined' | 'success' | 'failure' | 'error'
+  objective?: string
+  expected_objective?: string
+  chat_scorer?: RegisteredComponentReference | null
+  default_chat_scorer?: RegisteredComponentReference | null
+}
+
+export type ConversationDraftRole = 'system' | 'user' | 'simulated_assistant' | 'simulated_tool' | 'developer'
+
+export interface ConversationDraftPiece extends MessagePieceRequest {
+  readonly draftId: string
+  previewUrl?: string
+  filename?: string
+  file?: File
+}
+
+export interface ConversationSaveInput {
+  sourcePieceIds?: string[]
+  messages: ConversationDraftMessage[]
+  objective: string
+  initialObjective: string
+  target: TargetInstance | null
+  sourceAttackId: string | null
+  sourceConversationId: string | null
+  labels?: Record<string, string>
+}
+
+export interface NewAttackContext {
+  generation: string
+  ready: boolean
+  labels?: Record<string, string>
+  operationId?: string | null
+  chatScorer?: RegisteredComponentReference | null
+  chatScorerExplicit?: boolean
+}
+
+export interface ConvertedFileChip {
+  name: string
+  url: string
+  iconKind: 'image' | 'audio' | 'video' | 'file'
+}
+
+export interface ConversationDraftMessage extends MessageRequest {
+  readonly id: string
+  role: ConversationDraftRole
+  pieces: ConversationDraftPiece[]
+}
+
+export interface SaveConversationRequest {
+  save_id: string
+  chat_scorer?: RegisteredComponentReference | null
+  default_chat_scorer?: RegisteredComponentReference | null
+  destination: 'same_attack' | 'new_attack'
+  attack_result_id?: string
+  source_attack_result_id?: string
+  source_conversation_id?: string
+  expected_objective?: string
+  objective?: string
+  target_registry_name?: string
+  target_binding?: TargetBinding
+  operator?: string
+  operation_id?: string
+  labels?: Record<string, string>
+  messages: MessageRequest[]
+  reuse_unsent_conversation?: boolean
+  expected_source_piece_ids?: string[]
 }
 
 export interface CreateAttackResponse {
@@ -206,14 +1040,50 @@ export interface CreateAttackResponse {
 
 // --- Messages ---
 
+/** ScoreView payload returned by the backend. */
 export interface BackendScore {
   id: string
+  message_piece_id: string
   scorer_type: string
+  scorer_class_identifier?: ComponentIdentifier | null
   score_type: string
-  score_value: string
+  score_value?: string | null
+  status?: string
+  is_objective_score?: boolean
   score_category?: string[] | null
   score_rationale?: string | null
   timestamp: string
+}
+
+export type PromptResponseError = 'blocked' | 'none' | 'processing' | 'empty' | 'unknown'
+
+export interface ComponentIdentifier {
+  class_name: string
+  class_module: string
+  hash: string
+  eval_hash?: string | null
+  pyrit_version?: string
+  children?: Record<string, ComponentIdentifier | ComponentIdentifier[]>
+  attributes?: Record<string, unknown>
+  [parameter: string]: unknown
+}
+
+export interface ManualScoreInput {
+  value: boolean
+  rationale: string
+  update_attack: boolean
+}
+
+export type ManualScoreRequest = ManualScoreInput & {
+  attack_result_id: string
+  message_id: string
+}
+
+/** Score enriched with message-piece presentation fields for transcript rendering. */
+export interface DisplayScore extends BackendScore {
+  pieceIndex: number
+  pieceType: string
+  sourceLabel: string
 }
 
 export interface BackendMessagePiece {
@@ -229,8 +1099,9 @@ export interface BackendMessagePiece {
   original_filename?: string | null
   converted_filename?: string | null
   prompt_metadata?: Record<string, unknown> | null
+  converter_identifiers?: Array<Record<string, unknown>>
   scores: BackendScore[]
-  response_error: string // 'none' | 'blocked' | 'processing' | 'empty' | 'unknown'
+  response_error: PromptResponseError
   response_error_description?: string | null
 }
 
@@ -241,38 +1112,104 @@ export interface BackendMessage {
   created_at: string
 }
 
+export interface TargetResponseStatus {
+  response_error: PromptResponseError
+  request_turn_number: number
+  response_turn_number: number
+}
+
 export interface ConversationMessagesResponse {
+  scoring_failure?: ScoringFailure | null
   conversation_id: string
   messages: BackendMessage[]
+  target_response_status: TargetResponseStatus | null
 }
 
 export interface MessagePieceRequest {
   data_type: string // 'text' | 'image_path' | 'audio_path' | 'video_path' | 'binary_path'
   original_value: string
   converted_value?: string
+  converted_value_data_type?: string
+  applied_converter_ids?: string[]
+  applied_converter_provenance?: Array<string | null>
   mime_type?: string
   original_prompt_id?: string
+  source_piece_id?: string
   prompt_metadata?: Record<string, unknown>
 }
 
-export interface PrependedMessageRequest {
+export interface MessageRequest {
   role: string // 'system' | 'user' | 'assistant'
   pieces: MessagePieceRequest[]
 }
 
-export interface AddMessageRequest {
-  role: string
-  pieces: MessagePieceRequest[]
+export type PrependedMessageRequest = MessageRequest
+
+/**
+ * Ordered converter stack applied to specific pieces of a message.
+ * `indexes_to_apply` targets exact piece indexes; `prompt_data_types_to_apply`
+ * targets every piece of the listed data types.
+ */
+export interface ConverterConfigurationRequest {
+  converter_ids: string[]
+  indexes_to_apply?: number[]
+  prompt_data_types_to_apply?: string[]
+}
+
+export interface AddMessageRequest extends MessageRequest {
   send: boolean
   target_registry_name?: string
+  target_binding?: TargetBinding
   converter_ids?: string[]
+  request_converter_configurations?: ConverterConfigurationRequest[]
+  response_converter_configurations?: ConverterConfigurationRequest[]
+  start_token?: string
+  end_token?: string
   target_conversation_id: string
-  labels?: Record<string, string>
+}
+
+export interface LabelOptionsResponse {
+  source: string
+  operators?: string[]
+  operations?: string[]
+  labels: Record<string, string[]>
 }
 
 export interface AddMessageResponse {
   attack: AttackSummary
   messages: ConversationMessagesResponse
+}
+
+export type RepeatConversionMode = 'shared' | 'per_branch'
+
+export interface MessageSendRequest extends AddMessageRequest {
+  send: true
+  target_registry_name: string
+  submission_id: string
+  count?: number
+  request_converter_mode?: RepeatConversionMode
+}
+
+export interface MultiSendOptions {
+  count: number
+  requestConverterMode: RepeatConversionMode
+}
+
+export interface MessageSendConversation {
+  conversation_id: string
+  request_turn_number: number | null
+  state: 'queued' | 'preparing' | 'sending' | 'finalizing' | 'completed' | 'failed' | 'interrupted'
+  error: string | null
+  failure_stage: 'preparation' | 'sending' | 'finalization' | 'interrupted' | null
+  scoring_error?: string | null
+  is_scoring?: boolean
+}
+
+export interface MessageSendStatus extends MessageSendConversation {
+  send_id: string
+  attack_result_id: string
+  count?: number
+  conversations?: MessageSendConversation[]
 }
 
 export interface AttackListResponse {
@@ -309,4 +1246,1013 @@ export interface CreateConversationResponse {
 export interface ChangeMainConversationResponse {
   attack_result_id: string
   conversation_id: string
+}
+
+/**
+ * Wire shape of `DatasetInfo` from `GET /api/datasets`.
+ * Null counts mean the total is unknown, not zero.
+ */
+export interface DatasetInfo {
+  name: string
+  selection_key: string
+  loaded: boolean
+  provider_available: boolean
+  origins?: string[]
+  logical_examples: number | null
+  seed_pieces: number | null
+  objectives: number | null
+  modalities: string[]
+  harm_categories: string[]
+  has_unlabeled_harm_categories: boolean
+}
+
+/** Wire shape of `DatasetListResponse` from `GET /api/datasets`. */
+export interface DatasetListResponse {
+  items: DatasetInfo[]
+}
+
+/** Stored seed kinds accepted by the dataset seed browser. */
+export type SeedType = 'prompt' | 'objective' | 'simulated_conversation'
+
+/** Stored prompt data types. Media previews use `value_url`; the stored value stays a reference. */
+export type PromptDataType =
+  | 'text'
+  | 'image_path'
+  | 'audio_path'
+  | 'video_path'
+  | 'binary_path'
+  | 'url'
+  | 'reasoning'
+  | 'error'
+  | 'function_call'
+  | 'tool_call'
+  | 'function_call_output'
+
+export type ChatMessageRole =
+  | 'system'
+  | 'user'
+  | 'assistant'
+  | 'simulated_assistant'
+  | 'tool'
+  | 'simulated_tool'
+  | 'developer'
+
+/** How a seed entered memory. Unknown stays unknown; it is not inferred. */
+export type SeedOrigin = 'local' | 'remote' | 'generated' | 'user' | 'unknown'
+
+/** One typed objective condition. Extra fields stay on the object for inspection. */
+export interface SeedCondition {
+  condition_type: string
+  [key: string]: unknown
+}
+
+/**
+ * Wire shape of `SeedRecord` from the seed-example detail endpoint.
+ * This is stored inspection data, not an executable seed.
+ */
+export interface SeedRecord {
+  id: string
+  seed_type: SeedType
+  value: string
+  value_sha256: string | null
+  /**
+   * Client-fetchable media URL (`/api/media` or a signed blob URL).
+   * A non-URL or a missing field means the file cannot be previewed.
+   * `value` remains the stable stored reference.
+   */
+  value_url?: string | null
+  data_type: PromptDataType
+  name: string | null
+  dataset_name: string | null
+  origin: SeedOrigin
+  harm_categories: string[] | null
+  description: string | null
+  authors: string[] | null
+  groups: string[] | null
+  source: string | null
+  date_added: string
+  added_by: string
+  metadata: Record<string, unknown> | null
+  prompt_group_id: string | null
+  sequence: number | null
+  role: ChatMessageRole | null
+  parameters: string[] | null
+  conditions: SeedCondition[] | null
+  response_json_schema: Record<string, unknown> | null
+}
+
+/** Wire shape of one logical example from `GET /api/datasets/seeds`. */
+export interface SeedExampleSummary {
+  example_id: string
+  name: string | null
+  preview: string
+  preview_truncated: boolean
+  modalities: string[]
+  seed_types: string[]
+  piece_count: number
+  objective_count: number
+  harm_categories: string[]
+  has_unlabeled_harm: boolean
+}
+
+/** Wire shape of `SeedExampleListResponse`. `total` counts matching examples. */
+export interface SeedExampleListResponse {
+  items: SeedExampleSummary[]
+  pagination: PaginationInfo
+  total: number
+}
+
+/** Wire shape of `SeedExampleDetailResponse`, including stored members in server order. */
+export interface SeedExampleDetailResponse extends SeedExampleSummary {
+  members: SeedRecord[]
+}
+
+/** Query for `GET /api/datasets/seeds`. Facet arrays are repeated singular parameters. */
+export interface SeedExampleListParams {
+  selection_key: string
+  limit?: number
+  cursor?: string
+  search?: string
+  modality?: readonly string[]
+  seed_type?: readonly SeedType[]
+  harm_category?: readonly string[]
+}
+
+// --- Scenarios ---
+
+export type ScenarioDatasetLimit = number | 'all' | 'default'
+export type DatasetFetchPolicy = 'never' | 'if_missing' | 'always'
+
+export interface ScenarioDatasetSourceInput {
+  name: string
+  max_size?: ScenarioDatasetLimit | null
+  fetch?: DatasetFetchPolicy | 'default' | null
+}
+
+export interface ScenarioDatasetRequest {
+  sources?: ScenarioDatasetSourceInput[] | null
+  max_per_dataset?: ScenarioDatasetLimit | null
+  max_total?: ScenarioDatasetLimit | null
+  fetch?: DatasetFetchPolicy | 'default' | null
+  filters?: Record<string, string[]> | null
+}
+
+export interface ScenarioDatasetOptions {
+  mode: 'any' | 'subset' | 'fixed'
+  allowed_names: string[]
+  max_selected?: number | null
+  per_dataset_limit: boolean
+  total_limit: boolean
+  supports_overrides: boolean
+  filters: boolean
+  source_settings?: boolean
+}
+
+export interface ScenarioDatasetSourceSettings {
+  name: string
+  max_size: number | 'all'
+  fetch: DatasetFetchPolicy
+  configured_provider: boolean
+}
+
+export interface ScenarioDatasetSettings {
+  sources: ScenarioDatasetSourceSettings[]
+  max_per_dataset: number | 'all'
+  max_total: number | 'all'
+  fetch: DatasetFetchPolicy
+  filters: Record<string, string[]>
+}
+
+export interface ScenarioDatasetLoadResponse {
+  settings: ScenarioDatasetSettings
+  items: DatasetInfo[]
+}
+
+export interface RegisteredScenario {
+  supports_objective_scorer?: boolean
+  /** Maximum resolved concrete techniques, excluding baseline. Omitted/null means unrestricted. */
+  max_concrete_techniques?: number | null
+  scenario_name: string
+  scenario_type: string
+  scenario_version: number
+  description: string
+  description_markdown: string
+  default_technique: string
+  default_techniques: string[]
+  aggregate_techniques: string[]
+  aggregate_technique_expansions: Record<string, string[]>
+  all_techniques: string[]
+  technique_summaries: ScenarioTechniqueSummary[]
+  default_datasets: string[]
+  dataset_options?: ScenarioDatasetOptions
+  dataset_defaults?: ScenarioDatasetSettings
+  baseline_policy: 'enabled' | 'disabled' | 'forbidden'
+  include_baseline_by_default: boolean
+  uses_default_adversarial_target: boolean
+  supported_parameters: Parameter[]
+  /** All declared names, including opaque inputs with dedicated controls. */
+  supported_parameter_names: string[]
+  default_run_size: ScenarioRunSizeEstimateResponse
+}
+
+export interface ScenarioTechniqueSummary {
+  name: string
+  description: string | null
+  tags: string[]
+}
+
+export interface ListRegisteredScenariosResponse {
+  items: RegisteredScenario[]
+  pagination: PaginationInfo
+}
+
+/**
+ * A saved, portable scenario configuration.
+ *
+ * Every optional field is tri-state: absent means "use the scenario's own default",
+ * so a preset only pins what the author deliberately chose. It carries no target,
+ * Operation attribution, concurrency, retries or labels — those are decided when the
+ * preset is launched.
+ */
+export interface ScenarioPreset {
+  name: string
+  scenario_name: string
+  description?: string | null
+  /** Who created the preset. Descriptive only; never used to authorize a read or a write. */
+  author?: string | null
+  /**
+   * Whether the Scanner lists this preset as an entry of its own. Absent means listed.
+   * A hidden preset still runs through the suites that reference it.
+   */
+  show_in_scanner?: boolean
+  techniques?: string[] | null
+  /** Dataset sources, limits, fetch policy, and filters. Omit to use the scenario defaults. */
+  datasets?: ScenarioDatasetRequest | null
+  include_baseline?: boolean | null
+  scenario_params?: Record<string, unknown> | null
+}
+
+/** One advisory problem found checking a preset against this deployment's registry. */
+export interface PresetIssue {
+  field: string
+  message: string
+}
+
+export interface ScenarioPresetResponse {
+  preset: ScenarioPreset
+  /**
+   * Whether a stored document or registering code contributed this preset. A
+   * registered preset cannot be updated or deleted through the API.
+   */
+  origin: 'stored' | 'registered'
+  /** Opaque document version; required to update the preset. Null when registered in code. */
+  version: string | null
+  /** Empty when the preset is runnable here. Never blocks a save. */
+  issues: PresetIssue[]
+  /**
+   * How much this preset runs with its own techniques, datasets, and limits.
+   * List responses fill this in only when estimates are explicitly requested
+   * (off by default); it stays null for a preset this deployment cannot resolve.
+   */
+  run_size?: ScenarioRunSizeEstimateResponse | null
+}
+
+export interface ScenarioPresetListResponse {
+  source: string
+  items: ScenarioPresetResponse[]
+}
+
+export interface UpdateScenarioPresetRequest {
+  preset: ScenarioPreset
+  expected_version: string
+}
+
+export interface ScenarioSuiteEntry {
+  entry_id: string
+  preset_name: string
+}
+
+/** A user-authored, ordered collection of scenario preset references. */
+export interface ScenarioSuite {
+  name: string
+  schema_version: number
+  description?: string | null
+  /** Who created the suite. Descriptive only; never used to authorize a read or a write. */
+  author?: string | null
+  entries: ScenarioSuiteEntry[]
+}
+
+/** Current deployment-specific status for one suite entry. */
+export interface ScenarioSuiteEntryStatus {
+  entry_id: string
+  preset_name: string
+  origin: 'stored' | 'registered' | null
+  preset_version: string | null
+  /** Advisory only. Missing or invalid preset references do not prevent saving the suite. */
+  issues: PresetIssue[]
+}
+
+export interface ScenarioSuiteResponse {
+  suite: ScenarioSuite
+  /**
+   * Whether a stored document or registering code contributed this suite. A
+   * registered suite cannot be updated or deleted through the API.
+   */
+  origin: 'stored' | 'registered'
+  /** Opaque document version required to update a stored suite. Null when registered in code. */
+  version: string | null
+  /** Ordered exactly like `suite.entries`. */
+  entry_statuses: ScenarioSuiteEntryStatus[]
+}
+
+export interface ScenarioSuiteListResponse {
+  source: string
+  items: ScenarioSuiteResponse[]
+}
+
+export interface UpdateScenarioSuiteRequest {
+  suite: ScenarioSuite
+  expected_version: string
+}
+
+/** The preset state the operator reviewed for one suite entry. */
+export interface ScenarioSuiteLaunchEntrySnapshot {
+  entry_id: string
+  preset_name: string
+  origin: 'stored' | 'registered' | null
+  preset_version: string | null
+}
+
+/** Launch-owned fields and optimistic preconditions for one suite execution. */
+export interface LaunchScenarioSuiteRequest {
+  expected_version: string | null
+  entries: ScenarioSuiteLaunchEntrySnapshot[]
+  target_name: string
+  adversarial_target_name?: string | null
+  initializers?: string[] | null
+  initializer_args?: Record<string, Record<string, unknown>> | null
+  max_concurrency?: number | null
+  max_retries?: number | null
+  operation_id?: string | null
+  labels?: Record<string, string> | null
+}
+
+export type ScenarioSuiteExecutionStatus =
+  | 'QUEUING'
+  | 'IN_PROGRESS'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED'
+
+export type ScenarioSuiteExecutionEntryState =
+  | 'PENDING'
+  | 'SUBMITTING'
+  | 'SUBMISSION_FAILED'
+  | 'CREATED'
+  | 'QUEUED'
+  | 'IN_PROGRESS'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED'
+
+/** Current process-local state for one ordered suite entry. */
+export interface ScenarioSuiteExecutionEntrySummary {
+  entry_id: string
+  entry_position: number
+  preset_name: string
+  preset_origin: 'stored' | 'registered'
+  preset_version: string | null
+  state: ScenarioSuiteExecutionEntryState
+  run: ScenarioRunSummary | null
+  /** User-safe failure text. The UI still maps it to state-owned copy before display. */
+  error: string | null
+  /** Internal exception class for diagnostics; never display it to operators. */
+  error_type: string | null
+}
+
+/** Transient progress and grouped child runs for one suite launch. */
+export interface ScenarioSuiteExecutionSummary {
+  suite_execution_id: string
+  suite_name: string
+  suite_origin: 'stored' | 'registered'
+  suite_version: string | null
+  status: ScenarioSuiteExecutionStatus
+  created_at: string
+  updated_at: string
+  entries: ScenarioSuiteExecutionEntrySummary[]
+}
+
+export interface RunScenarioRequest {
+  objective_scorer?: RegisteredComponentReference | null
+  scenario_name: string
+  target_name?: string | null
+  adversarial_target_name?: string | null
+  initializers?: string[] | null
+  techniques?: string[] | null
+  technique_override?: TechniqueOverride | null
+  dataset_names?: string[] | null
+  max_dataset_size?: number | 'all' | 'default' | '' | null
+  dataset_filters?: Record<string, string[]> | null
+  datasets?: ScenarioDatasetRequest
+  max_concurrency?: number
+  max_retries?: number
+  include_baseline?: boolean | null
+  labels?: Record<string, string> | null
+  operation_id?: string | null
+  scenario_params?: Record<string, unknown> | null
+  initializer_args?: Record<string, Record<string, unknown>> | null
+  scenario_result_id?: string | null
+}
+
+export interface ScenarioRunSizeComponent {
+  label: string
+  count: number
+  is_baseline: boolean
+  note: string | null
+}
+
+export interface ScenarioDatasetSizeCap {
+  label: string
+  count: number
+  configured_on: 'dataset' | 'configuration' | 'compound'
+  dataset_name: string | null
+}
+
+export interface ScenarioDatasetSummary {
+  name: string
+  kind: 'dataset' | 'synthesized'
+  logical_seed_group_count: number | null
+  selected_seed_group_count: number | null
+  configured_caps: ScenarioDatasetSizeCap[]
+  selection_note: string | null
+}
+
+export type ScenarioDatasetSizeEstimate =
+  | { kind: 'bounded'; value: number }
+  | { kind: 'all_available' }
+  | { kind: 'indeterminate'; detail: string }
+
+export type DatasetLimitInput =
+  | { state: 'value'; value: number }
+  | { state: 'scenario_default' | 'not_applicable'; value?: null }
+
+export interface ScenarioRunSizeEstimateResponse {
+  status?: 'exact' | 'approximate' | 'conditional' | 'unavailable'
+  dataset_size: ScenarioDatasetSizeEstimate
+  dataset_limit: DatasetLimitInput
+  dataset_options?: ScenarioDatasetOptions
+  dataset_defaults?: ScenarioDatasetSettings
+  effective_datasets?: ScenarioDatasetSettings
+  estimated_attack_count: number | null
+  minimum_attack_count?: number | null
+  maximum_attack_count?: number | null
+  components: ScenarioRunSizeComponent[]
+  datasets: ScenarioDatasetSummary[]
+  effective_parameters?: Record<string, boolean | number | string | string[]>
+  note: string | null
+}
+
+export interface ScenarioRunSizeEstimateRequest {
+  objective_scorer?: RegisteredComponentReference | null
+  target_name?: string | null
+  adversarial_target_name?: string | null
+  techniques?: string[] | null
+  technique_override?: TechniqueOverride | null
+  dataset_names?: string[] | null
+  max_dataset_size?: number | 'all' | 'default' | '' | null
+  dataset_filters?: Record<string, string[]> | null
+  datasets?: ScenarioDatasetRequest
+  include_baseline?: boolean | null
+  scenario_params?: Record<string, unknown> | null
+}
+
+export interface ScenarioRunEstimateComponent {
+  id: string
+  label: string
+  count: number
+  isBaseline: boolean
+  note: string | null
+}
+
+export interface ScenarioRunEstimateDatasetCap {
+  id: string
+  label: string
+  count: number
+  configuredOn: 'dataset' | 'configuration' | 'compound'
+  datasetName: string | null
+}
+
+export interface ScenarioRunEstimateDataset {
+  id: string
+  name: string
+  kind: 'dataset' | 'synthesized'
+  logicalSeedGroupCount: number | null
+  selectedSeedGroupCount: number | null
+  configuredCaps: ScenarioRunEstimateDatasetCap[]
+  selectionNote: string | null
+}
+
+export interface ScenarioRunEstimate {
+  scope: 'default' | 'request'
+  datasetSize: ScenarioDatasetSizeEstimate
+  approximate?: boolean
+  total: number | null
+  minimum?: number | null
+  maximum?: number | null
+  components: ScenarioRunEstimateComponent[]
+  datasets: ScenarioRunEstimateDataset[]
+  effectiveParameters: Record<string, boolean | number | string | string[]>
+  note: string | null
+}
+
+export type ScenarioRunEstimateResult =
+  | {
+      status: 'available'
+      estimate: ScenarioRunEstimate
+    }
+  | {
+      status: 'conditional'
+      estimate: ScenarioRunEstimate
+    }
+  | {
+      status: 'unavailable'
+      scope: 'default' | 'request'
+      label: string
+      note?: string
+    }
+
+export type ScenarioRunEstimateState =
+  | {
+      status: 'loading'
+      scope: 'default' | 'request'
+    }
+  | {
+      status: 'refreshing'
+      estimate: ScenarioRunEstimate
+      label: string
+    }
+  | {
+      status: 'stale'
+      estimate: ScenarioRunEstimate
+      label: string
+      error: string
+    }
+  | ScenarioRunEstimateResult
+
+export type ScenarioRunEstimator = (
+  scenarioName: string,
+  request: ScenarioRunSizeEstimateRequest,
+  signal?: AbortSignal,
+) => Promise<ScenarioRunSizeEstimateResponse>
+
+export interface AttackErrorSummary {
+  atomic_attack_name: string
+  objective: string
+  error_type?: string | null
+  error_message?: string | null
+  total_retries: number
+}
+
+export interface RetryEvent {
+  timestamp: string
+  attempt_number: number
+  function_name: string
+  exception_type: string
+  exception_message: string
+  component_role: string
+  component_name?: string | null
+  endpoint?: string | null
+  status_code?: number | null
+  elapsed_seconds: number
+}
+
+export interface AttackRetrySummary {
+  attack_result_id: string
+  atomic_attack_name: string
+  retries: RetryEvent[]
+}
+
+export type ScenarioRunState = 'CREATED' | 'QUEUED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+
+export interface ScenarioOverloadSummary {
+  component_role: string
+  count: number
+  rate_limit_count: number
+  server_error_count: number
+  status_codes: number[]
+  latest_timestamp: string
+}
+
+export interface ScenarioRunSummary {
+  scenario_result_id: string
+  scenario_name: string
+  scenario_registry_name?: string | null
+  scenario_version: number
+  status: ScenarioRunState
+  created_at: string
+  started_at?: string | null
+  updated_at: string
+  error?: string | null
+  error_type?: string | null
+  techniques_used: string[]
+  total_attacks: number
+  completed_attacks: number
+  objective_achieved_rate: number
+  failed_attacks: AttackErrorSummary[]
+  attack_retries: AttackRetrySummary[]
+  total_retries: number
+  labels: Record<string, string>
+  completed_at?: string | null
+  pyrit_version?: string | null
+  target?: ScenarioTargetSummary | null
+  datasets_used?: string[]
+  scenario_parameters?: Record<string, unknown>
+  planned_total_available?: boolean
+  successful_attacks?: number
+  error_attacks?: number
+  attack_details_available?: boolean
+  queue_position?: number | null
+  active_scenario_result_id?: string | null
+  overload_summaries?: ScenarioOverloadSummary[]
+}
+
+export interface ScenarioTargetSummary {
+  target_type: string
+  endpoint?: string | null
+  model_name?: string | null
+  identifier_hash?: string | null
+}
+
+export interface ScenarioRunListItem {
+  scenario_result_id: string
+  scenario_name: string
+  scenario_registry_name?: string | null
+  scenario_version: number
+  status: ScenarioRunState
+  created_at: string
+  started_at?: string | null
+  updated_at: string
+  error?: string | null
+  error_type?: string | null
+  techniques_used: string[]
+  total_attacks: number | null
+  completed_attacks: number
+  objective_achieved_rate: number
+  total_retries: number
+  labels: Record<string, string>
+  operation_id?: string | null
+  /** The saved Operation's current name, or the historical name of a legacy run. */
+  operation_name?: string | null
+  completed_at?: string | null
+  pyrit_version?: string | null
+  target?: ScenarioTargetSummary | null
+  datasets_used: string[]
+  scenario_parameters: Record<string, unknown>
+  planned_total_available: boolean
+  successful_attacks: number
+  error_attacks: number
+  attack_details_available: boolean
+}
+
+export interface ScenarioRunListResponse {
+  items: ScenarioRunListItem[]
+  pagination: PaginationInfo
+}
+
+/** Compact persisted run header returned by the progress endpoint. */
+export interface ScenarioProgressHeader {
+  scenario_result_id: string
+  scenario_name: string
+  scenario_registry_name?: string | null
+  scenario_version: number
+  status: ScenarioRunState
+  created_at: string
+  started_at?: string | null
+  completed_at?: string | null
+  error?: string | null
+  error_type?: string | null
+  pyrit_version?: string | null
+  target?: ScenarioTargetSummary | null
+  techniques_used?: string[]
+  datasets_used?: string[]
+  scenario_parameters?: Record<string, unknown>
+  labels?: Record<string, string>
+  queue_position?: number | null
+  active_scenario_result_id?: string | null
+  overload_summaries?: ScenarioOverloadSummary[]
+}
+
+export interface ScenarioQueueEntry {
+  scenario_result_id: string
+  scenario_name: string
+  scenario_registry_name: string
+  created_at: string
+  enqueued_at: string
+  started_at?: string | null
+  state: ScenarioRunState
+  position?: number | null
+}
+
+export interface ScenarioQueueSnapshot {
+  revision: number
+  snapshot_at: string
+  active?: ScenarioQueueEntry | null
+  queued: ScenarioQueueEntry[]
+}
+
+/** One persisted attack attempt in ascending progress order. */
+export interface ScenarioProgressScore {
+  scorer_name: string
+  score_type: 'true_false' | 'float_scale' | 'unknown'
+  status: 'complete' | 'undetermined'
+  score_value?: string | null
+  score_rationale?: string | null
+}
+
+export type ScenarioIdentityValue =
+  | string
+  | number
+  | boolean
+  | null
+  | ScenarioIdentityValue[]
+  | { [key: string]: ScenarioIdentityValue }
+
+export interface ScenarioComponentIdentity {
+  component_name: string
+  parameters: Record<string, ScenarioIdentityValue>
+  children: Record<string, ScenarioComponentIdentity[]>
+}
+
+export type ScenarioAttackTechniqueDetails = ScenarioComponentIdentity
+
+export interface ScenarioProgressResult {
+  attack_result_id: string
+  conversation_id: string
+  atomic_group_id: string
+  atomic_attack_name: string
+  seed_group_id: string
+  outcome: 'success' | 'failure' | 'error' | 'undetermined'
+  execution_time_ms: number
+  timestamp: string
+  total_retries: number
+  retries: RetryEvent[]
+  error_type?: string | null
+  error_message?: string | null
+  score?: ScenarioProgressScore | null
+}
+
+export interface ScenarioRunPlanSeedGroup {
+  id: string
+  objective_sha256: string
+  objective: string
+  prompts: ScenarioRunPlanSeedPrompt[]
+}
+
+export interface ScenarioRunPlanSeedPrompt {
+  value: string
+  data_type?: string | null
+  role?: string | null
+  sequence: number
+  parameters: string[]
+}
+
+export interface PairedOutcomeStatistics {
+  baseline_group_id: string
+  attack_group_id: string
+  planned_pairs: number
+  decided_pairs: number
+  excluded_pairs: number
+  failure_to_success: number
+  success_to_failure: number
+  failure_to_failure: number
+  success_to_success: number
+  baseline_success_rate: number | null
+  attack_success_rate: number | null
+  paired_difference: number | null
+  missing_baseline: number
+  missing_attack: number
+  missing_both: number
+  baseline_errors: number
+  attack_errors: number
+  baseline_undetermined: number
+  attack_undetermined: number
+  unmatched_baseline_seeds: number
+  unmatched_attack_seeds: number
+  unattributed_attempts: number
+}
+
+export interface ScenarioRunPlanAtomicGroup {
+  kind?: 'baseline' | 'attack' | 'adaptive' | 'unknown' | null
+  id: string
+  atomic_attack_name: string
+  display_group: string
+  technique_name?: string | null
+  technique_eval_hash: string
+  seed_group_ids: string[]
+  description?: string | null
+  tags: string[]
+}
+
+export interface ScenarioRunPlan {
+  version: 1
+  scenario_registry_name?: string | null
+  atomic_groups: ScenarioRunPlanAtomicGroup[]
+  seed_groups: ScenarioRunPlanSeedGroup[]
+}
+
+export interface ScenarioProgressCounts {
+  completed: number
+  planned: number | null
+  succeeded: number
+  success_percentage: number | null
+  errors: number
+  retries: number
+}
+
+export interface ScenarioTechniqueProgress extends ScenarioProgressCounts {
+  id: string
+  display_group: string
+  atomic_attack_names: string[]
+  atomic_group_ids: string[]
+  description?: string | null
+  tags: string[]
+}
+
+export interface ScenarioDisplayGroupProgress extends ScenarioProgressCounts {
+  id: string
+  display_group: string
+  atomic_attack_names: string[]
+  atomic_group_ids: string[]
+}
+
+export interface ScenarioSeedGroupProgress extends ScenarioProgressCounts {
+  id: string
+  objective?: string | null
+}
+
+export interface ScenarioAtomicGroupProgress extends ScenarioProgressCounts {
+  id: string
+  atomic_attack_name: string
+  display_group: string
+  status: 'RUNNING' | 'PENDING' | 'INCOMPLETE' | 'COMPLETED'
+  technique_details?: ScenarioAttackTechniqueDetails | null
+}
+
+export interface ScenarioObjectiveScorerMetrics {
+  accuracy: number
+  accuracy_standard_error?: number | null
+  f1_score?: number | null
+  precision?: number | null
+  recall?: number | null
+  average_score_time_seconds?: number | null
+}
+
+export type ScenarioScorerIdentity = ScenarioComponentIdentity
+
+export interface ScenarioObjectiveScorer extends ScenarioScorerIdentity {
+  metrics?: ScenarioObjectiveScorerMetrics | null
+}
+
+export interface ScenarioProgressSummary {
+  overall: ScenarioProgressCounts
+  objective_scorer?: ScenarioObjectiveScorer | null
+  display_groups?: ScenarioDisplayGroupProgress[]
+  techniques: ScenarioTechniqueProgress[]
+  seed_groups: ScenarioSeedGroupProgress[]
+  atomic_groups: ScenarioAtomicGroupProgress[]
+  unattributed_attempts?: number
+}
+
+export interface ScenarioRunProgress {
+  run: ScenarioProgressHeader
+  plan: ScenarioRunPlan | null
+  results: ScenarioProgressResult[]
+  summary: ScenarioProgressSummary
+  next_cursor?: string | null
+  has_more: boolean
+  plan_complete: boolean
+}
+export interface RuntimeReadiness {
+  ready: boolean
+  state: string
+  generation: string
+}
+
+export interface RuntimeStatus {
+  state: string
+  generation: string
+  version: string | null
+  enabled: boolean
+  applying: boolean
+  outcome: string
+  message: string
+}
+export type FindingSeverity = 'critical' | 'important' | 'moderate' | 'low' | 'informational' | 'other'
+
+export interface OperationCreate {
+  name: string
+  description?: string
+}
+
+/** The editable fields of a saved Operation. Omitted fields are unchanged. */
+export interface OperationUpdate {
+  name?: string
+  description?: string
+}
+
+export interface Operation extends OperationCreate {
+  id: string
+  created_at: string
+}
+
+/** What refers to an Operation by ID. Only an Operation with no usage can be deleted. */
+export interface OperationUsage {
+  findings: number
+  attacks: number
+  scenario_runs: number
+}
+
+export interface OperationDetail extends Operation {
+  usage: OperationUsage
+}
+
+export interface OperationListItem extends Operation {
+  finding_counts: Partial<Record<FindingSeverity, number>>
+}
+
+export interface OperationListResponse {
+  items: OperationListItem[]
+}
+
+export interface FindingCreate {
+  title: string
+  description: string
+  severity: FindingSeverity
+  severity_other?: string | null
+  harm_type?: string | null
+  harm_type_other?: string | null
+}
+
+/** Resending the same id and content returns the finding an earlier, unanswered request saved. */
+export interface FindingCreateRequest extends FindingCreate {
+  id?: string
+  /** A saved attack result to link as evidence in the same request. */
+  attack_result_id?: string
+}
+
+export interface FindingOptionsResponse {
+  harm_types: string[]
+}
+
+export interface Finding extends FindingCreate {
+  id: string
+  operation_id: string
+  created_at: string
+}
+
+export interface FindingListResponse {
+  items: FindingListItem[]
+  has_more: boolean
+  next_offset: number | null
+}
+
+export interface FindingListItem extends Finding {
+  evidence_count: number
+}
+
+export interface FindingEvidenceCreateRequest {
+  attack_result_id: string
+}
+
+export interface FindingEvidence {
+  id: string
+  finding_id: string
+  attack_result_id: string
+  attached_at: string
+}
+
+export interface FindingEvidenceAttachResponse {
+  item: FindingEvidence
+  created: boolean
+}
+
+export interface FindingEvidenceItem {
+  item: FindingEvidence
+  availability: 'available' | 'unavailable'
+  scenario_result_id: string | null
+  /** The attack's own Operation, which may differ from the finding's. */
+  source_operation_id?: string | null
+  source_operation_name?: string | null
+  objective?: string | null
+  outcome?: AttackOutcome | null
+  /** The attack's current score: its human score, otherwise its automated score. */
+  score?: BackendScore | null
+  /** The conversation to open: the one holding the score, otherwise the attack's main conversation. */
+  conversation_id?: string | null
+}
+
+export interface FindingEvidenceListResponse {
+  items: FindingEvidenceItem[]
+  has_more: boolean
+  next_offset: number | null
 }

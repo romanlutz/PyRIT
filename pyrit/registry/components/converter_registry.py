@@ -16,8 +16,8 @@ A single registry for ``Converter`` that both:
 
 It is a ``Registry``: the registry's own surface (``get_class``,
 ``get_class_names``, ``get_all_registered_class_metadata``, ``create_instance``)
-is the buildable class catalog. Pre-configured instances live under the
-``instances`` property (``register``, ``get``, ``get_all_instances``,
+is the registered converter-class surface. Pre-configured instances live under the
+``instances`` property (``register``, ``get``, ``unregister``, ``get_all_instances``,
 ``get_names``), a ``DefaultInstanceRegistry``.
 """
 
@@ -28,8 +28,7 @@ from typing import TYPE_CHECKING
 
 from pyrit.models.identifiers import ConverterIdentifier
 from pyrit.models.parameter import ComponentType
-from pyrit.registry.instance_registry import DefaultInstanceRegistry, InstanceRegistry
-from pyrit.registry.registry import Registry
+from pyrit.registry.registry import InstanceHoldingRegistry
 from pyrit.registry.registry_metadata import RegistryMetadata
 
 if TYPE_CHECKING:
@@ -70,13 +69,13 @@ class ConverterMetadata(RegistryMetadata):
         return any(p.is_reference_to(ComponentType.TARGET) for p in self.parameters)
 
 
-class ConverterRegistry(Registry["Converter", ConverterMetadata]):
+class ConverterRegistry(InstanceHoldingRegistry["Converter", ConverterMetadata]):
     """
     Registry that discovers, builds, and holds ``Converter`` instances.
 
     Discovers all concrete ``Converter`` subclasses exported from
     ``pyrit.converter`` (keyed by their exact class name, e.g.
-    ``"Base64Converter"``) for the buildable catalog. Pre-configured instances
+    ``"Base64Converter"``) as registered buildable classes. Pre-configured instances
     registered via initializers or the backend are held under the ``instances``
     property.
 
@@ -93,8 +92,10 @@ class ConverterRegistry(Registry["Converter", ConverterMetadata]):
             lazy_discovery (bool): If True, class discovery is deferred until first
                 access. If False, discovery runs immediately.
         """
-        super().__init__(lazy_discovery=lazy_discovery)
-        self.instances: InstanceRegistry[Converter] = DefaultInstanceRegistry(instance_type=self._base_type)
+        super().__init__(
+            lazy_discovery=lazy_discovery,
+            reserved_instance_names={"preview", "types"},
+        )
 
     def _base_type(self) -> type[Converter]:
         """Return the ``Converter`` base class, imported lazily."""
@@ -115,3 +116,20 @@ class ConverterRegistry(Registry["Converter", ConverterMetadata]):
     def _metadata_class(self) -> type[ConverterMetadata]:
         """Return ``ConverterMetadata``; the base populates it from the common fields."""
         return ConverterMetadata
+
+    def _seam_base_type(self) -> type[Converter]:
+        """
+        Return ``Converter``: its non-required ``converter_target`` is a construction seam.
+
+        ``Converter.__init__`` declares ``converter_target=None`` so subclasses can
+        forward a target to it for validation — see the base class's construction
+        contract. A converter that does not declare the parameter itself has no
+        target input, so the seam is dropped from its derived contract. That keeps
+        the parameter list (and the LLM-based badge derived from it) aligned with
+        what the class actually builds from, and keeps a cleared target selection
+        from being looked up as a registry name.
+
+        Returns:
+            type[Converter]: The ``Converter`` base class.
+        """
+        return self._base_type()
