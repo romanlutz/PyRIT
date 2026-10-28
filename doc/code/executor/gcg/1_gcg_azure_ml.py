@@ -259,12 +259,17 @@ print(f"Studio URL: {returned_job.studio_url}")
 # prepended by `--output-dir`). For our config, that resolves to
 # `gcg_suffix_<timestamp>.json` under
 # `<download_dir>/named-outputs/results/` once we download. The
-# `controls` array in that file contains one entry per training step, and
-# the last entry is the final adversarial suffix that, appended to the user
-# prompt, was optimized to elicit the target response.
+# `controls` array contains logged checkpoints, not an iteration count.
+# With the default individual-goal strategy, each of the five goals logs an
+# initial checkpoint plus five optimization checkpoints (`test_steps=1`):
+# 30 entries for 25 optimization iterations in total. Other strategies,
+# checkpoint intervals, or early stopping can change that relationship.
+# The last entry is the final logged suffix. A nonempty suffix and finite loss
+# confirm a usable result artifact, not that the suffix achieves the objective.
 
 # %%
 import json
+import math
 import tempfile
 import time
 from pathlib import Path
@@ -301,7 +306,13 @@ with open(result_file) as f:
 final_suffix = log["controls"][-1] if log["controls"] else None
 final_loss = log["losses"][-1] if log["losses"] else None
 
+if not isinstance(final_suffix, str) or not final_suffix.strip():
+    raise ValueError("GCG result does not contain a nonempty final suffix.")
+if isinstance(final_loss, bool) or not isinstance(final_loss, (int, float)) or not math.isfinite(final_loss):
+    raise ValueError("GCG result does not contain a finite final loss.")
+
 print(f"Result file: {result_file.name}")
-print(f"Steps run: {len(log['controls'])}")
+print(f"Configured optimization steps per goal: {config.algorithm.n_steps}")
+print(f"Logged checkpoints: {len(log['controls'])}")
 print(f"Final loss: {final_loss}")
 print(f"Generated suffix: {final_suffix!r}")
