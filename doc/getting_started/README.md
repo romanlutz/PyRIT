@@ -2,6 +2,8 @@
 
 Welcome to PyRIT! Getting up and running takes two steps: **install** the package, then **configure** your AI endpoints.
 
+Not sure what you need? Read the [FAQ](./faq.md) for answers about accounts, providers, local models, application testing, and compatibility.
+
 :::::{grid} 1 1 3 3
 
 ::::{card} 📦 Install PyRIT

@@ -59,6 +59,7 @@ project:
     - file: security.md
     - file: getting_started/README.md
       children:
+        - file: getting_started/faq.md
         - file: getting_started/install.md
           children:
             - file: getting_started/install_docker.md
@@ -250,6 +251,8 @@ site:
   nav:
     - title: Installation
       url: /getting-started/readme
+    - title: FAQ
+      url: /getting-started/faq
     - title: GUI
       url: /gui/gui
     - title: Scanner
