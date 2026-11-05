@@ -243,6 +243,9 @@ evidence includes 222 pieces, a split scored multimodal turn, overlapping stable
 piece IDs and 121 references. Journeys cover bounded requests, continuation
 retry/restart failures, pending-reader ownership, URL/History context and
 keyboard/touch use. `PYRIT_E2E_HIERARCHY_PORT` overrides the loopback port.
+Metadata observers finish body acquisition before full-page navigation or reload,
+and propagate acquisition errors. Regression checks delay or fail only the
+observer's body read while leaving the application's real HTTP responses intact.
 
 ## Development
 

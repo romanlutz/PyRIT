@@ -28,10 +28,14 @@ async function controlSavedRead(
   return response.json()
 }
 
+interface SavedMetadataResponse {
+  readonly status: number
+  readonly body: AttackMetadata
+}
+
 interface SavedMetadataRead {
   readonly url: URL
-  readonly status: number
-  readonly body: Promise<AttackMetadata>
+  readonly result: Promise<PromiseSettledResult<SavedMetadataResponse>>
 }
 
 interface SavedReads {
@@ -46,14 +50,36 @@ function captureSavedReads(page: Page): SavedReads {
     if (request.method() === 'GET' && /\/api\/attacks\/[^/]+(?:\/(?:messages|conversations|metadata))?$/.test(url.pathname)) {
       reads.requests.push(url)
     }
-  })
-  page.on('response', (response: Response): void => {
-    const url = new URL(response.url())
-    if (response.request().method() === 'GET' && /\/api\/attacks\/[^/]+\/metadata$/.test(url.pathname)) {
-      reads.metadata.push({ url, status: response.status(), body: response.json() })
+    if (request.method() === 'GET' && /\/api\/attacks\/[^/]+\/metadata$/.test(url.pathname)) {
+      const acquisition = (async (): Promise<SavedMetadataResponse> => {
+        const response = await request.response()
+        if (!response) throw new Error(`Saved metadata request ended without a response: ${url}`)
+        return { status: response.status(), body: await response.json() }
+      })()
+      // Observe rejection immediately, then rethrow it at the next navigation or assertion.
+      const result = Promise.allSettled([acquisition]).then(
+        (results: [PromiseSettledResult<SavedMetadataResponse>]): PromiseSettledResult<SavedMetadataResponse> => results[0],
+      )
+      reads.metadata.push({ url, result })
     }
   })
   return reads
+}
+
+async function savedMetadataResponse(read: SavedMetadataRead): Promise<SavedMetadataResponse> {
+  const result = await read.result
+  if (result.status === 'rejected') throw result.reason
+  return result.value
+}
+
+async function navigateSaved(
+  page: Page, reads: SavedReads, navigate: () => Promise<Response | null>,
+): Promise<void> {
+  for (const read of reads.metadata) await savedMetadataResponse(read)
+  const nextMetadata = page.waitForRequest((request: Request): boolean =>
+    request.method() === 'GET' && /\/api\/attacks\/[^/]+\/metadata$/.test(new URL(request.url()).pathname))
+  await Promise.all([nextMetadata, Promise.resolve().then(navigate)])
+  for (const read of reads.metadata) await savedMetadataResponse(read)
 }
 
 async function expectBoundedReads(reads: SavedReads): Promise<void> {
@@ -65,8 +91,9 @@ async function expectBoundedReads(reads: SavedReads): Promise<void> {
   }
   expect(reads.metadata.length).toBeGreaterThan(0)
   for (const read of reads.metadata) {
-    expect(read.status).toBe(200)
-    const metadata = await read.body
+    const response = await savedMetadataResponse(read)
+    expect(response.status).toBe(200)
+    const metadata = response.body
     expect(metadata).not.toHaveProperty('related_conversations')
     expect(metadata).not.toHaveProperty('related_conversation_ids')
     expect(metadata).not.toHaveProperty('last_response')
@@ -91,9 +118,9 @@ function messagePieces(response: ConversationMessagesResponse): BackendMessagePi
   return response.messages.flatMap((message: BackendMessage): BackendMessagePiece[] => message.message_pieces)
 }
 
-async function openSaved(page: Page): Promise<ConversationMessagesResponse> {
+async function openSaved(page: Page, reads: SavedReads): Promise<ConversationMessagesResponse> {
   const initial = waitForSavedRead(page, 'messages', false)
-  await page.goto(SAVED_ROUTE)
+  await navigateSaved(page, reads, (): Promise<Response | null> => page.goto(SAVED_ROUTE))
   const response = await initial
   expect(response.status()).toBe(200)
   await expect(page.getByText(SAVED_RESPONSE, { exact: true })).toBeVisible()
@@ -108,6 +135,63 @@ async function openSaved(page: Page): Promise<ConversationMessagesResponse> {
 
 test.beforeEach(async ({ page }: { page: Page }): Promise<void> => {
   await controlSavedRead(page, 'reset')
+})
+
+for (const navigation of ['reload', 'goto'] as const) {
+  test(`finishes delayed metadata body acquisition before ${navigation}`, async ({ page }: { page: Page }): Promise<void> => {
+    const gate: { release?: () => void } = {}
+    const released = new Promise<void>((resolve: () => void): void => { gate.release = resolve })
+    let reading = false
+    let acquired = false
+    const delayBody = (response: Response): void => {
+      if (!/\/api\/attacks\/[^/]+\/metadata$/.test(new URL(response.url()).pathname)) return
+      page.off('response', delayBody)
+      const json = response.json.bind(response)
+      // Delay only the observer's body read, not the application's real HTTP response.
+      response.json = async (): Promise<AttackMetadata> => {
+        reading = true
+        await released
+        const body: AttackMetadata = await json()
+        acquired = true
+        return body
+      }
+    }
+    page.on('response', delayBody)
+    const reads = captureSavedReads(page)
+    await page.goto(SAVED_ROUTE)
+    await expect.poll((): boolean => reading).toBe(true)
+    await expect(page.getByText(SAVED_RESPONSE, { exact: true })).toBeVisible()
+    const navigated = navigateSaved(page, reads, (): Promise<Response | null> => {
+      expect(acquired, 'Navigation must wait for the previous metadata body.').toBe(true)
+      return navigation === 'reload' ? page.reload() : page.goto(SAVED_ROUTE)
+    })
+    if (!gate.release) throw new Error('The metadata body gate was not initialized.')
+    gate.release()
+    await navigated
+    await expect(page.getByText(SAVED_RESPONSE, { exact: true })).toBeVisible()
+    expect(reads.metadata).toHaveLength(2)
+    await expectBoundedReads(reads)
+  })
+}
+
+test('preserves metadata body acquisition errors and fails before navigation', async ({ page }: { page: Page }): Promise<void> => {
+  const acquisitionError = new Error('Metadata body is unavailable after navigation')
+  const failBody = (response: Response): void => {
+    if (!/\/api\/attacks\/[^/]+\/metadata$/.test(new URL(response.url()).pathname)) return
+    page.off('response', failBody)
+    response.json = async (): Promise<AttackMetadata> => { throw acquisitionError }
+  }
+  page.on('response', failBody)
+  const reads = captureSavedReads(page)
+  await page.goto(SAVED_ROUTE)
+  await expect(page.getByText(SAVED_RESPONSE, { exact: true })).toBeVisible()
+  let navigationStarted = false
+  await expect(navigateSaved(page, reads, (): Promise<Response | null> => {
+    navigationStarted = true
+    return page.reload()
+  })).rejects.toBe(acquisitionError)
+  expect(navigationStarted).toBe(false)
+  await expect(expectBoundedReads(reads)).rejects.toBe(acquisitionError)
 })
 
 async function openHierarchy(page: Page) {
@@ -214,7 +298,7 @@ test('opens an actual saved child chat and retains the existing scenario breadcr
     name: `Select conversation ${FIRST_PRUNED_ID}`, exact: true,
   }).click()
   await expect(page).toHaveURL(attackConversationRoutePath(SAVED_ATTACK_ID, FIRST_PRUNED_ID, scenarioResultId))
-  await page.reload()
+  await navigateSaved(page, reads, (): Promise<Response | null> => page.reload())
   await expect(page.getByText(`Saved pruned user for ${FIRST_PRUNED_ID}. Offline evidence.`, { exact: true })).toBeVisible()
   await expect(breadcrumb).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('scenario-saved-chat-breadcrumb.png'), animations: 'disabled' })
@@ -245,7 +329,7 @@ test('merges bounded piece pages and preserves the complete transcript when addi
   { page }: { page: Page }, testInfo: TestInfo,
 ): Promise<void> => {
   const reads = captureSavedReads(page)
-  const first = await openSaved(page)
+  const first = await openSaved(page, reads)
   const firstPieces = messagePieces(first)
   expect(first.messages.map((message: BackendMessage): number => message.turn_number)).toEqual([-1, 0, 1])
   expect(firstPieces[firstPieces.length - 1].id).toBe('ffffffff-ffff-ffff-ffff-ffffffffffff')
@@ -385,7 +469,7 @@ test('retains loaded evidence through continuation errors and a failed bounded r
   { page }: { page: Page }, testInfo: TestInfo,
 ): Promise<void> => {
   const reads = captureSavedReads(page)
-  await openSaved(page)
+  await openSaved(page, reads)
   const controls = page.getByRole('region', { name: 'Saved transcript paging' })
   await controlSavedRead(page, 'fail_messages')
   const failed = waitForSavedRead(page, 'messages', true)
@@ -425,7 +509,7 @@ test('pages references independently and retains rows through retry and restart 
 ): Promise<void> => {
   const reads = captureSavedReads(page)
   const firstRead = waitForSavedRead(page, 'conversations', false)
-  const transcript = await openSaved(page)
+  const transcript = await openSaved(page, reads)
   const first: AttackConversationsResponse = await (await firstRead).json()
   expect(first.conversations).toHaveLength(50)
   expect(first.total_count).toBe(121)
@@ -485,7 +569,7 @@ test('owns pending continuations across rapid selection, attack navigation and u
   { page }: { page: Page },
 ): Promise<void> => {
   const reads = captureSavedReads(page)
-  await openSaved(page)
+  await openSaved(page, reads)
   const panel = page.getByTestId('conversation-panel')
   for (const count of [100, 121]) {
     await panel.getByRole('button', { name: 'Load more conversations', exact: true }).click()
@@ -572,7 +656,7 @@ test.describe('on a narrow touch screen', () => {
   ): Promise<void> => {
     await page.setViewportSize({ width: 390, height: 844 })
     const reads = captureSavedReads(page)
-    const first = await openSaved(page)
+    const first = await openSaved(page, reads)
     const transcriptPaging = page.getByRole('region', { name: 'Saved transcript paging' })
     const transcriptStatus = transcriptPaging.getByRole('status')
     await expect(transcriptStatus).toHaveText('100 message pieces loaded. Transcript incomplete.')
@@ -650,14 +734,15 @@ test.describe('on a narrow touch screen', () => {
     await expect(page.getByText(`Saved pruned user for ${OFF_PAGE_ID}. Offline evidence.`, { exact: true }))
       .toBeInViewport({ ratio: 0.5 })
     await page.screenshot({ path: testInfo.outputPath('scenario-saved-pruned-mobile.png'), animations: 'disabled' })
-    await page.reload()
+    await navigateSaved(page, reads, (): Promise<Response | null> => page.reload())
     await expect(page.getByText(`Saved pruned user for ${OFF_PAGE_ID}. Offline evidence.`, { exact: true })).toBeVisible()
     await expect(page.getByRole('link', { name: 'Back to scan', exact: true })).toBeVisible()
     const outsidePageId = !firstReferenceIds.has(OFF_PAGE_ID) ? OFF_PAGE_ID
       : loadedReferences.find((reference: ConversationSummary): boolean => !firstReferenceIds.has(reference.conversation_id))?.conversation_id
     if (!outsidePageId) throw new Error('The saved fixture has no conversation outside its initial reference page.')
-    await page.goto(attackConversationRoutePath(SAVED_ATTACK_ID, outsidePageId, scenarioResultId))
-    await page.reload()
+    await navigateSaved(page, reads, (): Promise<Response | null> =>
+      page.goto(attackConversationRoutePath(SAVED_ATTACK_ID, outsidePageId, scenarioResultId)))
+    await navigateSaved(page, reads, (): Promise<Response | null> => page.reload())
     await expect(page.getByText(`Saved pruned user for ${outsidePageId}. Offline evidence.`, { exact: true })).toBeVisible()
     await toggle.focus()
     await page.keyboard.press('Enter')
@@ -668,7 +753,8 @@ test.describe('on a narrow touch screen', () => {
     await page.screenshot({ path: testInfo.outputPath('scenario-saved-off-page-mobile.png'), animations: 'disabled' })
     await panel.getByRole('button', { name: 'Close panel', exact: true }).click()
 
-    await page.goto(attackConversationRoutePath(SAVED_ATTACK_ID, OFF_PAGE_ID))
+    await navigateSaved(page, reads, (): Promise<Response | null> =>
+      page.goto(attackConversationRoutePath(SAVED_ATTACK_ID, OFF_PAGE_ID)))
     await expect(page.getByText(`Saved pruned user for ${OFF_PAGE_ID}. Offline evidence.`, { exact: true })).toBeVisible()
     await expect(page.getByRole('region', { name: 'Saved transcript paging' })).toContainText('End of saved transcript. 2 message pieces loaded.')
     await expect(page.getByRole('link', { name: 'Back to scan', exact: true })).toHaveCount(0)
