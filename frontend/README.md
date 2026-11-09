@@ -482,6 +482,35 @@ and detached elements remain excluded. Await role queries after dialog
 transitions, including when returning to background controls. This is not a
 layout engine; use Playwright for assertions about element dimensions or positioning.
 
+### Known upstream encoding deprecation (F32)
+
+As of November 9, 2026, `npm ci` reports a deprecation for
+`whatwg-encoding@3.1.1`. This is a transitive dependency of the Jest browser
+environment, not an application dependency:
+
+```text
+jest-environment-jsdom@30.5.2
+  -> jsdom@26.1.0
+     -> whatwg-encoding@3.1.1
+     -> html-encoding-sniffer@4.0.0 -> whatwg-encoding@3.1.1
+```
+
+The latest published `jest-environment-jsdom` is still `30.5.2` and declares
+`jsdom: ^26.1.0`. The upstream owner of the required parent update is
+[Jest's jsdom environment](https://github.com/jestjs/jest/blob/main/packages/jest-environment-jsdom/package.json).
+Removing this warning through a supported parent update is blocked until that
+environment supports a jsdom release that migrates both encoding dependencies.
+Updating only the sniffer would leave jsdom's direct dependency in place.
+
+Do not alias or override `whatwg-encoding` with `@exodus/bytes`: the deprecation
+message recommends a library migration, not a drop-in package replacement.
+Do not force a jsdom major outside Jest's declared range or suppress npm warnings.
+Keep the existing browser-test environment and CI's Node 22 tooling unchanged
+until a supported parent update is available. Recheck the chain from `frontend`
+with `npm ls whatwg-encoding jsdom html-encoding-sniffer jest-environment-jsdom --package-lock-only`;
+after an upstream update, run `npm ci` and `npm run test:coverage` before removing
+this note.
+
 ### E2E Test Modes
 
 E2E flow tests run in two modes controlled by Playwright projects and an environment variable:
