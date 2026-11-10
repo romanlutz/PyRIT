@@ -500,15 +500,22 @@ before closing the issue.
 
 ### Update the documentation site versions
 
-Add the new release as a version on the [documentation site](https://microsoft.github.io/PyRIT/) by
-editing `.github/docs-versions.yml`:
+First publish the release's raw HTML archive using the explicit workflow below. Then add
+the release on the [documentation site](https://microsoft.github.io/PyRIT/) by editing
+`.github/docs-versions.yml` in a reviewed change:
 
-- Insert the new release at the top of `versions:`, immediately after the `latest` entry, with `slug: "x.y.z"`, `name: "x.y.z"`, and `ref: releases/vx.y.z`. The picker renders the list in file order, which is newest first.
+- Insert the release immediately after `latest`, with `slug: "x.y.z"`, `name: "x.y.z"`,
+  `ref: releases/vx.y.z`, and the actual `archive` pin emitted by the archive workflow.
+  The picker renders this list in file order, newest first. The `ref` is descriptive:
+  moving that branch does not refresh the published historical HTML.
 - Update `stable:` and `default:` at the top of the file to point at the new version (so the
   root URL `microsoft.github.io/PyRIT/` and the `/stable/` alias redirect to it).
 
-Once merged, the docs workflow rebuilds the site and the new version appears in the version picker on
-every page of every version.
+Once merged, the normal workflow builds only `latest`, downloads every pinned historical
+archive, verifies checksums and provenance, and composes the full site. Missing or corrupt
+archives, wrong identities, unsafe archive entries, and missing or extra version directories
+stop publication before a Pages artifact can be uploaded. There is no historical rebuild
+fallback, including after cache eviction or workflow edits.
 
 The behavior below applies only to branches with the updated `build-book` workflow.
 For PRs targeting a release branch, that target branch must contain the update;
@@ -519,42 +526,89 @@ It checks out the PR's immutable tested merge commit, not `main` or the PR's mov
 head branch. This also applies to PRs targeting release branches; `latest` is only
 the validation artifact's slug and does not change what will be published.
 
-PRs changing the version configuration, docs workflow, matrix/composition/manifest
-helpers, or version-picker code also build every configured release and run the
-read-only `Compose site` job. That checks the complete tree, default/stable redirects,
-page manifests, and picker before publication. Ordinary content, API, or dependency
-changes do not rebuild historical releases. Markdown-only documentation changes
-trigger both PR validation and publication after merging.
+PRs changing version configuration, docs workflows, archive/matrix/composition/manifest
+helpers, or version-picker code also retrieve the historical archives and run the read-only
+`Compose site` job. That checks the complete tree, default/stable redirects, page manifests,
+and picker before publication. Fork PRs can read the public archives but cannot publish them.
+Ordinary content, API, or dependency changes only validate `latest`.
 
 Only a push to `main` or a manual run from `main` can deploy. Both publish the full
 configured version list, with `latest` pinned to that run's commit. Release pushes
-and manual runs from other refs remain validation-only. A listed release validates
-its own version at the triggering commit. An unlisted release or manual ref validates
-that commit under `latest`, while retaining all configured historical releases.
+and manual runs from other refs validate only the triggering commit under the artifact
+slug `latest`; they do not compose, refresh historical archives, or deploy.
 Production runs share a non-cancelling queue for the **whole pipeline**, so a slower earlier build cannot
 overtake a later deployment. PRs have separate per-PR queues that cancel superseded
 runs and never cancel a publication.
 
-Rendered-site caches require an exact match on the tested workflow's hash, version
-slug, and checked-out commit SHA. There are no partial-key fallbacks to a build of
-`main`. Each release still uses its own build scripts and `uv.lock` with
-`uv sync --frozen`; changing the pipeline invalidates old rendered-site caches.
+The optional latest rendered-site cache requires an exact match on the tested workflow
+hash and source SHA. Historical HTML is durable Release storage, not an Actions cache
+or an expiring Actions artifact.
 
-For example, releasing `1.1.0` would change:
+### Durable documentation archives
 
-```yaml
-default: "1.0.1"
-stable: "1.0.1"
+**Initial activation is a separate, authorized operation.** The configuration deliberately
+contains no invented pins. Until storage and all historical pins exist, full composition
+fails closed and the live Pages site is left untouched. Do not merge this pipeline change
+for production publication before completing bootstrap and reviewing the real pins.
+
+Use a dedicated published GitHub Release with a `docs-archives` tag (or
+`docs-archives-<suffix>`), not a Python package release. Obtain approval for the repository,
+tag, and exact existing commit first. Create that release separately with `--latest=false`
+so it neither moves a package tag nor becomes the latest package release. The archive
+workflow never creates a release/tag, moves a tag, deploys Pages, edits the configuration,
+or overwrites an asset. Protect its `docs-archives` environment with trusted reviewers.
+After creating storage, add the real `archive_release.repository` and `archive_release.tag`
+to `.github/docs-versions.yml`.
+
+Recover existing complete `site-<version>` artifacts before rebuilding anything. For example,
+successful main docs run `42745074316` contains all five historical versions configured
+at the time of this migration, with artifacts expiring on November 17, 2026. Artifact
+availability is temporary; check it again before recovery. The recovery command uses the
+original artifact digest, checks a successful trusted main run, and derives the exact
+historical checkout SHA from that version's job log. A current release branch tip or the
+main run's SHA is not a substitute for that evidence.
+
+```bash
+uv run --no-project --python 3.13 --with "pyyaml==6.0.3" python -m build_scripts.docs_archive_release recover \
+  --repository microsoft/PyRIT --run-id 42745074316 --slug 1.1.0 \
+  --base /PyRIT --output-dir recovered-docs
 ```
 
-to:
+This is read-only on GitHub. It saves a uniquely named `.tar.gz` archive and a matching
+`.tar.json` candidate pin locally. Each archive contains raw, pre-composition HTML and all
+artifact assets, including hidden files. Previously injected picker HTML is rejected rather
+than accumulating stale injections. Do not use page-by-page crawls as complete archives.
+If the artifact or checkout evidence is unavailable, an intentional one-version rebuild
+is required; recovery never silently falls back to one.
 
-```yaml
-default: "1.1.0"
-stable: "1.1.0"
+After authorization, use **Publish one documentation archive** (`docs-archive.yml`), dispatched
+from `main`. Choose `recover`, a release slug, the original successful run ID, and the existing
+storage tag. To publish an already recovered local archive before its source expires, invoke
+the `publish` subcommand with the same repository/tag and the exact archive and candidate pin
+paths. It validates the archive, uploads without `--clobber`, then downloads the new asset
+again to verify it. Local publication is a privileged operation and needs the same approval.
+
+For a new release, or when recovery is impossible, explicitly select `build` with the release
+slug and full 40-character source SHA. Only that source is checked out and built, using its own
+scripts and frozen lockfile. The archive's provenance records the source SHA, repository,
+workflow SHA, run ID and attempt. A recovered archive additionally records its original
+Actions artifact ID and SHA-256. Build and recovery run read-only; only the separate,
+environment-protected publish job receives `contents: write`.
+
+The workflow emits `proposed-docs-archive-pin` and prints the candidate JSON in its summary.
+Copy that complete object to the version's `archive` mapping, including the numeric
+`asset_id`, archive `sha256`, immutable `source_sha`, and complete `provenance`. Do not pin
+only an asset name or a moving ref. Validate the final configuration with:
+
+```bash
+uv run --no-project --python 3.13 --with "pyyaml==6.0.3" python -m build_scripts.docs_archive validate \
+  --config .github/docs-versions.yml --base /PyRIT
 ```
 
-and add an entry under `versions:` for `1.1.0` pointing at `releases/v1.1.0`.
+Download and compose the entire configured set in PR validation before merging. Refreshing
+any historical version requires a new uniquely named asset and a reviewed pin update;
+routine documentation publication cannot change historical HTML. Keep old assets for
+rollback and do not delete assets referenced by supported configurations.
 
 ## 11. Create GitHub Release
 

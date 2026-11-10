@@ -123,7 +123,7 @@ def test_render_not_found_includes_auto_redirect_script(module):
 
 
 def test_compose_strips_trailing_slash_in_base(module, tmp_path):
-    artifacts = _make_artifacts(tmp_path, ["0.13.0"])
+    artifacts = _make_artifacts(tmp_path, ["latest", "0.13.0"])
     cfg = _make_config(tmp_path)
     dist = tmp_path / "dist"
     rc = module.main(
@@ -146,7 +146,7 @@ def test_compose_strips_trailing_slash_in_base(module, tmp_path):
 
 
 def test_compose_overwrites_existing_version_dir(module, tmp_path):
-    artifacts = _make_artifacts(tmp_path, ["0.13.0"])
+    artifacts = _make_artifacts(tmp_path, ["latest", "0.13.0"])
     cfg = _make_config(tmp_path)
     dist = tmp_path / "dist"
     # Pre-create a dir with stale content
@@ -223,4 +223,4 @@ def test_compose_errors_when_no_site_artifacts(module, tmp_path, capsys):
         ]
     )
     assert rc == 1
-    assert "no site-*" in capsys.readouterr().err
+    assert "expected exactly site-*" in capsys.readouterr().err

@@ -7,6 +7,7 @@ on:
       - "releases/v*"
     paths:
       - ".github/workflows/docs.yml"
+      - ".github/workflows/docs-archive.yml"
       - ".github/docs-versions.yml"
       - "build_scripts/**"
       - "doc/**"
@@ -25,6 +26,7 @@ on:
       - "releases/**"
     paths:
       - ".github/workflows/docs.yml"
+      - ".github/workflows/docs-archive.yml"
       - ".github/docs-versions.yml"
       - "build_scripts/**"
       - "doc/**"
@@ -107,7 +109,7 @@ jobs:
           echo "workflow_hash=$WORKFLOW_HASH" >> "$GITHUB_OUTPUT"
 
   # ------------------------------------------------------------------
-  # 2. Build each version in parallel.
+  # 2. Build only the tested latest source. Historical HTML is never rebuilt here.
   # ------------------------------------------------------------------
   build:
     name: Build ${{ matrix.slug }}
@@ -125,8 +127,7 @@ jobs:
           ref: ${{ matrix.ref }}
 
       - name: Resolve commit SHA
-        # PR previews use the immutable merge SHA. Other matrix refs may be
-        # release branches, so always key the cache by the actual checkout.
+        # Every matrix contains only latest at the immutable tested source SHA.
         id: sha
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -160,9 +161,7 @@ jobs:
 
       - name: Install PyRIT with dev dependencies
         if: steps.cache.outputs.cache-hit != 'true'
-        # Use `uv sync --frozen` so each release branch installs the exact
-        # versions pinned in its own uv.lock. Frozen branch = frozen deps =
-        # bit-for-bit reproducible rebuild forever.
+        # Install the tested source's lockfile without updating dependencies.
         #
         # Newer release branches (incl. main) use PEP 735 [dependency-groups];
         # older releases use legacy [project.optional-dependencies]. We pick
@@ -191,8 +190,7 @@ jobs:
           uv run --frozen --no-sync python -m build_scripts.gen_api_md
 
       - name: Check documentation links
-        # The latest slot contains main or the tested PR merge. Frozen release
-        # docs retain their historical build tolerance.
+        # The latest validation slot contains the triggering source commit.
         if: steps.cache.outputs.cache-hit != 'true' && matrix.slug == 'latest'
         working-directory: doc
         run: uv run --frozen --no-sync jupyter-book build --site --strict --check-links
@@ -214,6 +212,7 @@ jobs:
           path: doc/_build/html
           retention-days: 7
           if-no-files-found: error
+          include-hidden-files: true
 
   # ------------------------------------------------------------------
   # 3. Exercise composition on full matrices without deployment permissions.
@@ -248,6 +247,15 @@ jobs:
         with:
           path: artifacts
           pattern: site-*
+
+      - name: Retrieve verified historical HTML
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          uv run --no-project --with "pyyaml==6.0.3" python -m build_scripts.docs_archive fetch \
+            --config .github/docs-versions.yml \
+            --base "${DOCS_BASE}" \
+            --artifacts-dir artifacts
 
       - name: Compose dist/
         # Compose script does everything: stage artifacts into dist/<slug>/,

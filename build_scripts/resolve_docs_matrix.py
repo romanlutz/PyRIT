@@ -5,8 +5,8 @@
 Reads ``.github/docs-versions.yml`` and writes GitHub Actions step outputs
 (``matrix``, ``default``, ``stable``, ``versions_json``, ``compose``) to ``$GITHUB_OUTPUT``,
 or to stdout when ``--github-output`` is not provided (for local testing).
-PRs validate the tested merge commit under ``latest``. Only composition-input
-changes also build the release versions; non-PR runs retain the full matrix.
+Every run builds only the tested commit under ``latest``. Composition-input PRs
+and main publications retrieve pinned historical archives, never their sources.
 
 Usage:
     python -m build_scripts.resolve_docs_matrix \\
@@ -45,10 +45,18 @@ def load_config(config_path: Path) -> dict[str, Any]:
     if not isinstance(cfg["versions"], list) or not cfg["versions"]:
         raise ValueError(f"{config_path}: 'versions' must be a non-empty list")
     for entry in cfg["versions"]:
+        if not isinstance(entry, dict):
+            raise ValueError(f"{config_path}: version entries must be mappings")
         for key in ("slug", "name", "ref"):
             if key not in entry:
                 raise ValueError(f"{config_path}: version entry {entry!r} missing required key '{key}'")
+            if not isinstance(entry[key], str) or not entry[key]:
+                raise ValueError(f"{config_path}: {key} must be a non-empty string")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", entry["slug"]) or entry["slug"] in ("stable",):
+            raise ValueError(f"{config_path}: unsafe or reserved version slug {entry['slug']!r}")
     slugs = {v["slug"] for v in cfg["versions"]}
+    if len(slugs) != len(cfg["versions"]):
+        raise ValueError(f"{config_path}: duplicate version slugs")
     if cfg["default"] not in slugs:
         raise ValueError(
             f"{config_path}: 'default' value {cfg['default']!r} is not among versions slugs {sorted(slugs)}"
@@ -66,6 +74,9 @@ def _requires_composition(changed_files: list[str]) -> bool:
         "build_scripts/compose_docs_dist.py",
         "build_scripts/generate_pages_manifest.py",
         "build_scripts/inject_version_picker.py",
+        "build_scripts/docs_archive.py",
+        "build_scripts/docs_archive_release.py",
+        ".github/workflows/docs-archive.yml",
     }
     return any(
         path in composition_inputs or path.startswith("build_scripts/version_picker_assets/") for path in changed_files
@@ -97,28 +108,15 @@ def build_outputs(
     if event_name and not ref:
         raise ValueError("workflow builds require the triggering GITHUB_REF")
     versions = cfg["versions"]
-    entries = [{"slug": v["slug"], "ref": v["ref"]} for v in versions]
-    compose = True
+    latest = [v for v in versions if v["slug"] == "latest"]
+    if len(latest) != 1:
+        raise ValueError("documentation validation requires exactly one 'latest' version")
+    entries = [{"slug": "latest", "ref": sha if event_name else latest[0]["ref"]}]
+    compose = not event_name or ref == "refs/heads/main"
     if event_name == "pull_request":
         if changed_files is None:
             raise ValueError("PR matrix selection requires the tested merge's changed files")
-        if sum(entry["slug"] == "latest" for entry in entries) != 1:
-            raise ValueError("PR validation requires exactly one 'latest' version")
         compose = _requires_composition(changed_files)
-        entries = [
-            {"slug": entry["slug"], "ref": sha if entry["slug"] == "latest" else entry["ref"]}
-            for entry in entries
-            if compose or entry["slug"] == "latest"
-        ]
-    elif event_name:
-        tested_entries = [entry for entry in entries if entry["ref"] in (ref, ref.removeprefix("refs/heads/"))]
-        if not tested_entries and ref != "refs/heads/main":
-            # Newly cut releases are added to the version list on main later.
-            tested_entries = [entry for entry in entries if entry["slug"] == "latest"]
-            if len(tested_entries) != 1:
-                raise ValueError("unlisted-ref validation requires exactly one 'latest' version")
-        for entry in tested_entries:
-            entry["ref"] = sha
     matrix = {"include": entries}
     versions_json = {
         "default": cfg["default"],

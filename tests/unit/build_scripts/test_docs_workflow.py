@@ -243,7 +243,9 @@ def test_docs_and_dependency_inputs_trigger_pr_validation_and_main_publication()
 
 
 @pytest.mark.parametrize("event_name", ["pull_request", "push", "workflow_dispatch"])
-def test_full_matrix_composes_every_version_redirect_and_picker(*, tmp_path: Path, event_name: str) -> None:
+def test_latest_build_and_archived_releases_compose_every_redirect_and_picker(
+    *, tmp_path: Path, event_name: str
+) -> None:
     cfg = resolve_docs_matrix.load_config(CONFIG)
     outputs = resolve_docs_matrix.build_outputs(
         cfg=cfg,
@@ -254,7 +256,8 @@ def test_full_matrix_composes_every_version_redirect_and_picker(*, tmp_path: Pat
     )
     assert outputs["compose"] == "true"
     artifacts = tmp_path / "artifacts"
-    for entry in json.loads(outputs["matrix"])["include"]:
+    assert json.loads(outputs["matrix"])["include"] == [{"slug": "latest", "ref": TESTED_SHA}]
+    for entry in cfg["versions"]:
         site = artifacts / f"site-{entry['slug']}"
         site.mkdir(parents=True)
         (site / "index.html").write_text(f"<html><head></head><body>{entry['slug']}</body></html>", encoding="utf-8")
@@ -268,7 +271,9 @@ def test_full_matrix_composes_every_version_redirect_and_picker(*, tmp_path: Pat
     )
     assert inject_version_picker.main(["--site-dir", str(dist), "--base", "/PyRIT"]) == 0
 
-    assert json.loads((dist / "versions.json").read_text(encoding="utf-8")) == cfg
+    assert json.loads((dist / "versions.json").read_text(encoding="utf-8")) == {
+        key: cfg[key] for key in ("default", "stable", "versions")
+    }
     for entry in cfg["versions"]:
         html = (dist / entry["slug"] / "index.html").read_text(encoding="utf-8")
         assert f"<body>{entry['slug']}</body>" in html
@@ -277,3 +282,43 @@ def test_full_matrix_composes_every_version_redirect_and_picker(*, tmp_path: Pat
     assert f"url=/PyRIT/{cfg['default']}/" in (dist / "index.html").read_text(encoding="utf-8")
     assert f"url=/PyRIT/{cfg['stable']}/" in (dist / "stable" / "index.html").read_text(encoding="utf-8")
     assert "function findClosestPage" in (dist / "404.html").read_text(encoding="utf-8")
+
+
+def test_historical_sources_are_never_in_normal_build_matrix() -> None:
+    cfg = resolve_docs_matrix.load_config(CONFIG)
+    for event in ("push", "pull_request", "workflow_dispatch"):
+        outputs = resolve_docs_matrix.build_outputs(
+            cfg=cfg,
+            event_name=event,
+            ref="refs/heads/main",
+            sha=TESTED_SHA,
+            changed_files=[".github/workflows/docs.yml"],
+        )
+        assert json.loads(outputs["matrix"])["include"] == [{"slug": "latest", "ref": TESTED_SHA}]
+    steps = _workflow()["jobs"]["compose"]["steps"]
+    fetch = _step(job="compose", name="Retrieve verified historical HTML")
+    assert "build_scripts.docs_archive fetch" in fetch["run"]
+    assert "if" not in fetch
+    assert steps.index(fetch) < steps.index(_step(job="compose", name="Compose dist/"))
+    assert _step(job="build", name="Upload built site")["with"]["include-hidden-files"] == "true"
+
+
+def test_archive_publisher_is_explicit_main_only_and_job_scoped() -> None:
+    workflow = yaml.load(
+        (REPO_ROOT / ".github" / "workflows" / "docs-archive.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    assert set(workflow["on"]) == {"workflow_dispatch"}
+    assert workflow["permissions"] == {"contents": "read", "actions": "read"}
+    prepare = workflow["jobs"]["prepare"]
+    publish = workflow["jobs"]["publish"]
+    assert prepare["if"] == "github.ref == 'refs/heads/main'"
+    assert "permissions" not in prepare
+    assert publish["if"] == "github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'"
+    assert publish["permissions"] == {"contents": "write"}
+    assert publish["environment"] == "docs-archives"
+    assert publish["needs"] == "prepare"
+    assert all("deploy-pages" not in step.get("uses", "") for step in publish["steps"])
+    text = json.dumps(workflow)
+    assert "--clobber" not in text and "release create" not in text
+    assert "pull_request_target" not in text

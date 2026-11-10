@@ -38,9 +38,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from build_scripts.docs_archive import validate_site
 from build_scripts.generate_pages_manifest import collect_pages
+from build_scripts.resolve_docs_matrix import load_config
 
 # Single source of truth for the closest-page algorithm. Both the version
 # picker (inject_version_picker.py) and the 404 page below concat the
@@ -193,21 +193,25 @@ def render_not_found_html(base: str, default_slug: str) -> str:
     return html.replace(CLOSEST_PAGE_MARKER, closest_page_js)
 
 
-def load_config(config_path: Path) -> dict[str, Any]:
-    if not config_path.is_file():
-        raise FileNotFoundError(f"docs-versions config not found at {config_path}")
-    with config_path.open(encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def stage_versions(artifacts_dir: Path, dist_dir: Path) -> list[str]:
+def stage_versions(*, artifacts_dir: Path, dist_dir: Path, expected: set[str]) -> list[str]:
     """Move each ``artifacts/site-<slug>/`` into ``dist/<slug>/``. Returns staged slugs."""
     if not artifacts_dir.is_dir():
         raise FileNotFoundError(f"artifacts dir not found at {artifacts_dir}")
+    entries = list(artifacts_dir.iterdir())
+    actual = {entry.name.removeprefix("site-") for entry in entries}
+    if actual != expected or any(not entry.name.startswith("site-") for entry in entries):
+        raise ValueError(f"expected exactly site-* versions {sorted(expected)}; found {sorted(actual)}")
+    for entry in entries:
+        if entry.is_symlink() or not entry.is_dir():
+            raise ValueError(f"invalid site artifact: {entry}")
+        validate_site(entry)
+    if dist_dir.exists():
+        allowed = expected | {"stable", "index.html", "404.html", "versions.json"}
+        unexpected = {entry.name for entry in dist_dir.iterdir()} - allowed
+        if unexpected:
+            raise ValueError(f"dist contains unconfigured entries: {sorted(unexpected)}")
     staged: list[str] = []
-    for entry in sorted(artifacts_dir.iterdir()):
-        if not entry.is_dir() or not entry.name.startswith("site-"):
-            continue
+    for entry in sorted(entries):
         slug = entry.name[len("site-") :]
         target = dist_dir / slug
         if target.exists():
@@ -278,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         cfg = load_config(config_path)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
@@ -286,8 +290,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[compose_docs_dist] staging artifacts from {artifacts_dir} into {dist_dir}")
     try:
-        staged = stage_versions(artifacts_dir, dist_dir)
-    except FileNotFoundError as e:
+        staged = stage_versions(
+            artifacts_dir=artifacts_dir, dist_dir=dist_dir, expected={entry["slug"] for entry in cfg["versions"]}
+        )
+    except (FileNotFoundError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     if not staged:

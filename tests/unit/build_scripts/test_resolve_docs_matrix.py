@@ -62,13 +62,7 @@ def test_build_outputs_shape(module, tmp_path):
     assert outputs["default"] == "0.13.0"
     assert outputs["stable"] == "0.13.0"
     matrix = json.loads(outputs["matrix"])
-    assert matrix == {
-        "include": [
-            {"slug": "latest", "ref": "main"},
-            {"slug": "0.13.0", "ref": "releases/v0.13.0"},
-            {"slug": "0.12.1", "ref": "releases/v0.12.1"},
-        ]
-    }
+    assert matrix == {"include": [{"slug": "latest", "ref": "main"}]}
     payload = json.loads(outputs["versions_json"])
     assert payload["default"] == "0.13.0"
     assert payload["stable"] == "0.13.0"
@@ -234,11 +228,14 @@ def test_ordinary_pr_only_builds_tested_merge(*, module: ModuleType, tmp_path: P
         "build_scripts/compose_docs_dist.py",
         "build_scripts/generate_pages_manifest.py",
         "build_scripts/inject_version_picker.py",
+        "build_scripts/docs_archive.py",
+        "build_scripts/docs_archive_release.py",
+        ".github/workflows/docs-archive.yml",
         "build_scripts/version_picker_assets/picker.js",
         "build_scripts/version_picker_assets/closest_page.js",
     ],
 )
-def test_composition_pr_keeps_all_releases_and_tested_merge(
+def test_composition_pr_builds_only_tested_merge_and_retrieves_releases(
     *, module: ModuleType, tmp_path: Path, changed_path: str
 ) -> None:
     cfg = module.load_config(_write_yaml(tmp_path, _VALID_YAML))
@@ -250,29 +247,21 @@ def test_composition_pr_keeps_all_releases_and_tested_merge(
         changed_files=["doc/index.md", changed_path],
     )
 
-    assert json.loads(outputs["matrix"]) == {
-        "include": [
-            {"slug": "latest", "ref": TESTED_SHA},
-            {"slug": "0.13.0", "ref": "releases/v0.13.0"},
-            {"slug": "0.12.1", "ref": "releases/v0.12.1"},
-        ]
-    }
+    assert json.loads(outputs["matrix"]) == {"include": [{"slug": "latest", "ref": TESTED_SHA}]}
     assert outputs["compose"] == "true"
     assert json.loads(outputs["versions_json"]) == cfg
 
 
 @pytest.mark.parametrize("event_name", ["push", "workflow_dispatch"])
 @pytest.mark.parametrize("branch", ["main", "releases/v0.13.0"])
-def test_non_pr_keeps_full_matrix_and_pins_triggering_branch(
+def test_non_pr_only_builds_triggering_commit(
     *, module: ModuleType, tmp_path: Path, event_name: str, branch: str
 ) -> None:
     cfg = module.load_config(_write_yaml(tmp_path, _VALID_YAML))
     outputs = module.build_outputs(cfg=cfg, event_name=event_name, ref=f"refs/heads/{branch}", sha=TESTED_SHA)
 
-    assert json.loads(outputs["matrix"]) == {
-        "include": [{"slug": v["slug"], "ref": TESTED_SHA if v["ref"] == branch else v["ref"]} for v in cfg["versions"]]
-    }
-    assert outputs["compose"] == "true"
+    assert json.loads(outputs["matrix"]) == {"include": [{"slug": "latest", "ref": TESTED_SHA}]}
+    assert outputs["compose"] == str(branch == "main").lower()
     assert json.loads(outputs["versions_json"]) == cfg
 
 
@@ -285,17 +274,13 @@ def test_non_pr_keeps_full_matrix_and_pins_triggering_branch(
         ("workflow_dispatch", "refs/tags/v9.9.9"),
     ],
 )
-def test_unlisted_non_main_ref_validates_its_commit_without_dropping_releases(
+def test_non_main_ref_validates_its_commit_without_composition(
     *, module: ModuleType, tmp_path: Path, event_name: str, ref: str
 ) -> None:
     cfg = module.load_config(_write_yaml(tmp_path, _VALID_YAML))
     outputs = module.build_outputs(cfg=cfg, event_name=event_name, ref=ref, sha=TESTED_SHA)
-    assert json.loads(outputs["matrix"]) == {
-        "include": [
-            {"slug": v["slug"], "ref": TESTED_SHA if v["slug"] == "latest" else v["ref"]} for v in cfg["versions"]
-        ]
-    }
-    assert outputs["compose"] == "true"
+    assert json.loads(outputs["matrix"]) == {"include": [{"slug": "latest", "ref": TESTED_SHA}]}
+    assert outputs["compose"] == "false"
     assert json.loads(outputs["versions_json"]) == cfg
 
 
@@ -303,7 +288,7 @@ def test_unlisted_ref_substitution_does_not_change_main_publication(*, module: M
     cfg = module.load_config(_write_yaml(tmp_path, _VALID_YAML))
     cfg["versions"][0]["ref"] = "b" * 40
     outputs = module.build_outputs(cfg=cfg, event_name="push", ref="refs/heads/main", sha=TESTED_SHA)
-    assert json.loads(outputs["matrix"]) == {"include": [{"slug": v["slug"], "ref": v["ref"]} for v in cfg["versions"]]}
+    assert json.loads(outputs["matrix"]) == {"include": [{"slug": "latest", "ref": TESTED_SHA}]}
 
 
 def test_workflow_requires_triggering_ref(*, module: ModuleType, tmp_path: Path) -> None:
