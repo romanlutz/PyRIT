@@ -54,6 +54,12 @@ project:
       severity: ignore
       keys:
         - "https://crates.io"
+    # 0DIN's public homepage serves product content in browsers but returns
+    # 403 to CI link checks. Keep research, API, and threat-feed URLs checked.
+    - rule: link-resolves
+      severity: ignore
+      keys:
+        - "https://0din.ai/"
     # OpenAI's Sora retirement notice returns 403 to CI link checks.
     # Keep the canonical source and exempt only this article.
     - rule: link-resolves

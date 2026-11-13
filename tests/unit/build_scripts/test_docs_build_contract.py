@@ -48,6 +48,7 @@ def test_pdf_targets_share_checked_export_and_all_builds_html_first() -> None:
     [
         COMMONS_SOURCE,
         "https://crates.io",
+        "https://0din.ai/",
         "https://help.openai.com/en/articles/20001152-what-to-know-about-the-sora-discontinuation",
     ],
 )
@@ -56,6 +57,23 @@ def test_robot_exceptions_only_skip_the_verified_url(url: str) -> None:
     rules = config["project"]["error_rules"]
     exception = next(rule for rule in rules if url in rule.get("keys", []))
     assert exception == {"rule": "link-resolves", "severity": "ignore", "keys": [url]}
+
+
+def test_output_handling_citation_keeps_the_correct_owasp_edition() -> None:
+    path = REPO_ROOT / "doc" / "code" / "scoring" / "1_true_false_scorers"
+    notebook = json.loads(path.with_suffix(".ipynb").read_text(encoding="utf-8"))
+    companion = jupytext.read(path.with_suffix(".py"), fmt="py:percent")
+    assert [cell["source"].rstrip() for cell in companion.cells] == [
+        "".join(cell["source"]).rstrip() for cell in notebook["cells"]
+    ]
+    citation = (
+        "[OWASP 2023–24 LLM02 — Insecure Output Handling]"
+        "(https://genai.owasp.org/llmrisk2023-24/llm02-insecure-output-handling/)"
+    )
+    assert any(citation in "".join(cell["source"]) for cell in notebook["cells"])
+    assert "https://genai.owasp.org/llmrisk/llm02-insecure-output-handling/" not in path.with_suffix(".py").read_text(
+        encoding="utf-8"
+    )
 
 
 @pytest.mark.parametrize(
