@@ -5,6 +5,8 @@ project:
     - name: Microsoft AI Red Team
   copyright: Copyright 2024, Microsoft AI Red Team
   github: microsoft/PyRIT
+  plugins:
+    - _plugins/notebook_identifiers.mjs
   bibliography:
     - references.bib
   # MyST copies these to the site root, preserving the videos directory.

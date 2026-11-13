@@ -23,6 +23,7 @@ from unit.async_utils import TEST_WATCHDOG_SECONDS
         "test_closest_page.cjs",
         "test_landing_video_players.cjs",
         "test_docs_deployment.cjs",
+        "test_notebook_identifiers.mjs",
     ],
 )
 def test_docs_javascript(suite: str) -> None:

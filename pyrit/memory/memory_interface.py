@@ -1486,7 +1486,7 @@ class MemoryInterface(abc.ABC):
 
         Raises:
             ValueError: If no embedding model is provided and required environment
-            variables are not set.
+                variables are not set.
         """
         from pyrit.memory.memory_embedding import default_memory_embedding_factory
 
@@ -4579,7 +4579,7 @@ class MemoryInterface(abc.ABC):
             data_types (Sequence[str] | None): List of data types to filter seed prompts by
                 (e.g., text, image_path).
             harm_categories (Sequence[str]): A list of harm categories to filter by. If None,
-            all harm categories are considered.
+                all harm categories are considered.
                 Specifying multiple harm categories returns only prompts that are marked with all harm categories.
             harm_categories_patterns (Sequence[str] | None): Case-insensitive full LIKE patterns.
                 All must match decoded list elements.
@@ -4783,7 +4783,7 @@ class MemoryInterface(abc.ABC):
             data_types (Sequence[str] | None): List of data types to filter seed prompts by
                 (e.g., text, image_path).
             harm_categories (Sequence[str]): A list of harm categories to filter by. If None,
-            all harm categories are considered.
+                all harm categories are considered.
                 Specifying multiple harm categories returns only prompts that are marked with all harm categories.
             harm_categories_patterns (Sequence[str] | None): Case-insensitive full LIKE patterns.
                 All must match decoded list elements.
@@ -4908,7 +4908,7 @@ class MemoryInterface(abc.ABC):
             data_types (Sequence[str] | None): List of data types to filter seed prompts by
                 (e.g., text, image_path).
             harm_categories (Sequence[str]): A list of harm categories to filter by. If None,
-            all harm categories are considered.
+                all harm categories are considered.
                 Specifying multiple harm categories matches only prompts that are marked with all harm categories.
             harm_categories_patterns (Sequence[str] | None): Case-insensitive full LIKE patterns.
                 All must match decoded list elements.
@@ -5059,7 +5059,7 @@ class MemoryInterface(abc.ABC):
             data_types (Sequence[str] | None): List of data types to filter seed prompts by
                 (e.g., text, image_path).
             harm_categories (Sequence[str]): A list of harm categories to filter by. If None,
-            all harm categories are considered.
+                all harm categories are considered.
                 Specifying multiple harm categories matches only prompts that are marked with all harm categories.
             harm_categories_patterns (Sequence[str] | None): Case-insensitive full LIKE patterns.
                 All must match decoded list elements.
@@ -6501,7 +6501,7 @@ class MemoryInterface(abc.ABC):
                 '/' escapes the next character; brackets, '*' and backslashes are literal.
                 If both dataset_name and dataset_name_pattern are provided, dataset_name takes precedence.
             data_types (Sequence[str] | None, Optional): List of data types to filter seed prompts by
-            (e.g., text, image_path).
+                (e.g., text, image_path).
             harm_categories (Sequence[str] | None, Optional): List of harm categories to filter seed prompts by.
             harm_categories_patterns (Sequence[str] | None): Case-insensitive full LIKE patterns.
                 All must match decoded list elements.
@@ -11179,7 +11179,7 @@ class MemoryInterface(abc.ABC):
             data_types (Sequence[str] | None): List of data types to filter seed prompts by
                 (e.g., text, image_path).
             harm_categories (Sequence[str]): A list of harm categories to filter by. If None,
-            all harm categories are considered.
+                all harm categories are considered.
                 Specifying multiple harm categories returns only prompts that are marked with all harm categories.
             harm_categories_patterns (Sequence[str] | None): Case-insensitive full LIKE patterns.
                 All must match decoded list elements.
@@ -11383,7 +11383,7 @@ class MemoryInterface(abc.ABC):
             data_types (Sequence[str] | None): List of data types to filter seed prompts by
                 (e.g., text, image_path).
             harm_categories (Sequence[str]): A list of harm categories to filter by. If None,
-            all harm categories are considered.
+                all harm categories are considered.
                 Specifying multiple harm categories matches only prompts that are marked with all harm categories.
             harm_categories_patterns (Sequence[str] | None): Case-insensitive full LIKE patterns.
                 All must match decoded list elements.
@@ -11580,7 +11580,7 @@ class MemoryInterface(abc.ABC):
             data_types (Sequence[str] | None): List of data types to filter seed prompts by
                 (e.g., text, image_path).
             harm_categories (Sequence[str]): A list of harm categories to filter by. If None,
-            all harm categories are considered.
+                all harm categories are considered.
                 Specifying multiple harm categories matches only prompts that are marked with all harm categories.
             harm_categories_patterns (Sequence[str] | None): Case-insensitive full LIKE patterns.
                 All must match decoded list elements.
@@ -11879,7 +11879,7 @@ class MemoryInterface(abc.ABC):
                 '/' escapes the next character; brackets, '*' and backslashes are literal.
                 If both dataset_name and dataset_name_pattern are provided, dataset_name takes precedence.
             data_types (Sequence[str] | None, Optional): List of data types to filter seed prompts by
-            (e.g., text, image_path).
+                (e.g., text, image_path).
             harm_categories (Sequence[str] | None, Optional): List of harm categories to filter seed prompts by.
             harm_categories_patterns (Sequence[str] | None): Case-insensitive full LIKE patterns.
                 All must match decoded list elements.

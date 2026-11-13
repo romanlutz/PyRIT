@@ -111,6 +111,7 @@ def test_prompt_shield_documentation_preserves_literal_prompt_tags() -> None:
         ("pyrit.memory.memory_models", "AttackResultEntry", "objective"),
         ("pyrit.score.scorer_evaluation.human_labeled_dataset", "HumanLabeledEntry", "conversation"),
         ("pyrit.score.scorer_evaluation.scorer_evaluator", "ScorerEvalDatasetFiles", "result_file"),
+        ("pyrit.executor.promptgen.anecdoctor", "AnecdoctorResult", "generated_content"),
     ],
 )
 def test_data_fields_are_rendered_as_attributes(
@@ -121,4 +122,32 @@ def test_data_fields_are_rendered_as_attributes(
     result = class_to_dict(module[class_name])
     assert field in {item["name"] for item in result["docstring"]["attributes"]}
     assert "params" not in result["docstring"]
+    assert "does not appear in the function signature" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("method", "parameter", "continuation"),
+    [
+        ("get_seeds_async", "harm_categories", "all harm categories are considered."),
+        ("remove_seeds_from_memory_async", "harm_categories", "all harm categories are considered."),
+        ("remove_seed_groups_from_memory_async", "harm_categories", "all harm categories are considered."),
+        ("get_seed_groups_async", "data_types", "(e.g., text, image_path)."),
+    ],
+)
+def test_memory_parameter_continuations_remain_in_the_description(
+    *, method: str, parameter: str, continuation: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = Path("pyrit") / "memory" / "memory_interface.py"
+    module = griffe.visit("sample", filepath=path, code=path.read_text(encoding="utf-8"))
+    result = function_to_dict(module["MemoryInterface"][method])
+    entry = next(item for item in result["docstring"]["params"] if item["name"] == parameter)
+    assert continuation in entry["desc"]
+    assert "Failed to get 'name: description' pair" not in caplog.text
+
+
+def test_json_callback_documents_only_its_public_argument(caplog: pytest.LogCaptureFixture) -> None:
+    path = Path("pyrit") / "prompt_target" / "http_target" / "http_target_callback_functions.py"
+    module = griffe.visit("sample", filepath=path, code=path.read_text(encoding="utf-8"))
+    result = function_to_dict(module["get_http_target_json_response_callback_function"])
+    assert [item["name"] for item in result["docstring"]["params"]] == ["key"]
     assert "does not appear in the function signature" not in caplog.text

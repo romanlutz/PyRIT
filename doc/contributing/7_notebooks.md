@@ -28,9 +28,17 @@ editing documentation.
 
 Keep existing notebook cell IDs. Our `nbstripout` hook preserves them with
 `--keep-id`, rather than renumbering each notebook from zero. Use explicit,
-project-unique MyST labels for stable cross-document references. Legacy numeric
-IDs can cause duplicate-reference warnings in MyST's project-wide index; do not
-renumber notebooks or change their outputs just to silence these warnings.
+project-unique MyST labels for stable cross-document references.
+
+The document-stage plugin `doc/_plugins/notebook_identifiers.mjs` namespaces
+legacy numeric fallback identifiers in MyST's project-wide reference index.
+It updates local numeric references and links to notebook cells before reference
+resolution, including output cells and caption targets. The notebook path scopes
+each internal identifier, preventing duplicate warnings and links resolving to
+another notebook's same-numbered cell. Explicit labels and existing HTML anchors
+stay unchanged. No source cell IDs, metadata, or saved outputs are rewritten.
+Use explicit labels for references without a notebook path from other documents;
+a bare number does not identify a unique cell across notebooks.
 
 ### Jupytext metadata warnings
 
@@ -58,6 +66,21 @@ sections, filters, pairing information, cell metadata, or outputs to silence
 them, and do not broadly suppress frontmatter validation. The focused Jupytext
 contract tests in `tests/unit/build_scripts/test_docs_build_contract.py` cover
 pair resolution, metadata filtering, language handling, and output restoration.
+The published `myst-frontmatter` 1.10.2 validator still has the same limitation;
+upgrading the reader alone does not currently resolve these warnings.
+
+### API extraction diagnostics
+
+The extractor validates Google-style docstrings against static source signatures.
+Descriptions continued under an argument or exception need an additional
+indentation level; otherwise a sentence can be parsed as another table row.
+Document result fields under `Attributes`, not constructor `Args`.
+
+Remaining signature diagnostics include parameters deliberately forwarded through
+`@forward_init_parameters` and legacy `Generic[T]` type parameters. These are
+static-parser limitations, not missing public arguments. Keep those documented
+contracts and runtime signatures intact rather than removing useful documentation
+or filtering warnings to obtain a zero count.
 
 ### HTML build
 
@@ -97,6 +120,14 @@ access; auth-required and robot-policy exceptions are listed in `doc/myst.yml`.
 The docs workflow runs strict link checking for the `latest` slot, including PR
 validation, before rendering. Frozen release versions retain their existing build
 behavior.
+
+Transient external-link failures still fail the native strict build. The locked
+CLI does not expose the original failed response's `Retry-After` header or a
+per-request timeout, and published `myst-cli` 1.12.0 retains those limitations.
+A later HTTP probe cannot recover an earlier response's requested delay. Do not
+replace this check with blanket build retries or classify every network error as
+transient; permanent HTTP failures, invalid URLs, and local-reference errors must
+remain visible.
 
 Where GNU Make is available, `make docs-build` prepares the API reference, builds
 strict HTML with link checking, and generates RSS. The hosted multiversion
