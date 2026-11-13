@@ -494,7 +494,7 @@ def render_class(
         parts.extend(
             render_function(
                 m,
-                heading_level="####",
+                heading_level="###",
                 module=module,
                 class_name=name,
                 symbol_index=symbol_index,
