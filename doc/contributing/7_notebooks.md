@@ -26,6 +26,14 @@ providers. Notebook execution is a separate step that requires configured
 credentials. Keep the committed notebook outputs and JupyText metadata when
 editing documentation.
 
+Keep existing notebook cell IDs. Our `nbstripout` hook preserves them with
+`--keep-id`, rather than renumbering each notebook from zero. For legacy numeric
+IDs, the MyST plugin namespaces automatic cross-reference identifiers by notebook
+path during the build, without changing source notebooks or their outputs.
+Existing page-local cell fragments such as `notebook.ipynb#0` stay valid.
+Use explicit, project-unique MyST labels for stable cross-document references;
+the plugin leaves author-supplied labels and nonnumeric cell IDs unchanged.
+
 Use this checkout's uv environment and locked development dependencies:
 
 ```powershell

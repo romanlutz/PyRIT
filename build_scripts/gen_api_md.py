@@ -19,6 +19,7 @@ Usage:
 import json
 import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 # Import sibling script for post-generation TOC validation.
@@ -61,6 +62,37 @@ def _function_anchor(module: str, func_name: str) -> str:
 
 def _method_anchor(module: str, class_name: str, method_name: str) -> str:
     return f"api-{_module_slug(module)}-{class_name}-{method_name}"
+
+
+def _unique_symbol_anchors(index: dict[str, list[SymbolEntry]]) -> dict[str, list[SymbolEntry]]:
+    """Disambiguate MyST's case-insensitive labels, retaining non-colliding anchors."""
+    entries = {entry for matches in index.values() for entry in matches}
+    reserved = {entry.anchor.lower() for entry in entries}
+    used: set[str] = set()
+    replacements: dict[SymbolEntry, SymbolEntry] = {}
+    # Functions render before classes, so keep the old destination for shared labels.
+    for entry in sorted(entries, key=lambda e: (e.module, e.kind != "function", e.qualname)):
+        anchor = entry.anchor
+        if anchor.lower() in used:
+            anchor = f"{entry.anchor}-{entry.kind}"
+            suffix = 2
+            while anchor.lower() in reserved or anchor.lower() in used:
+                anchor = f"{entry.anchor}-{entry.kind}-{suffix}"
+                suffix += 1
+        used.add(anchor.lower())
+        replacements[entry] = replace(entry, anchor=anchor)
+    return {key: [replacements[entry] for entry in matches] for key, matches in index.items()}
+
+
+def _indexed_anchor(
+    anchor: str,
+    *,
+    qualified_name: str,
+    symbol_index: dict[str, list[SymbolEntry]] | None,
+) -> str:
+    """Use the same resolved label for rendered definitions and references."""
+    entries = symbol_index.get(qualified_name, []) if symbol_index is not None else []
+    return entries[0].anchor if len(entries) == 1 else anchor
 
 
 def render_params(params: list[dict]) -> str:
@@ -211,7 +243,7 @@ def _build_symbol_index(modules: list[dict]) -> dict[str, list[SymbolEntry]]:
                 )
                 _add(name, entry)
                 _add(f"{mod_name}.{name}", entry)
-    return index
+    return _unique_symbol_anchors(index)
 
 
 def _resolve_symbol(raw: str, index: dict[str, list[SymbolEntry]], current_class: str | None) -> SymbolEntry | None:
@@ -411,6 +443,8 @@ def render_function(
     ret_str = f" → {ret}" if ret else ""
 
     anchor = _method_anchor(module, class_name, name) if class_name else _function_anchor(module, name)
+    qualname = f"{class_name}.{name}" if class_name else name
+    anchor = _indexed_anchor(anchor, qualified_name=f"{module}.{qualname}", symbol_index=symbol_index)
 
     # Anchor label precedes the heading so MyST cross-refs can target it.
     parts = [f"({anchor})=", f"{heading_level} `{prefix}{name}`\n"]
@@ -460,8 +494,10 @@ def render_class(
     """Render a class as markdown."""
     name = cls["name"]
     bases = cls.get("bases", [])
+    if symbol_index is None:
+        symbol_index = _build_symbol_index([{"name": module, "members": [cls]}])
 
-    anchor = _class_anchor(module, name)
+    anchor = _indexed_anchor(_class_anchor(module, name), qualified_name=f"{module}.{name}", symbol_index=symbol_index)
     parts = [f"({anchor})=", f"## `{name}`\n"]
     bases_md = _format_bases(bases, symbol_index)
     if bases_md:
@@ -523,6 +559,8 @@ def render_module(
 ) -> str:
     """Render a full module page."""
     mod_name = data["name"]
+    if symbol_index is None:
+        symbol_index = _build_symbol_index([data])
     short_name = mod_name.rsplit(".", 1)[-1]
     mod_label = f"api-{_module_slug(mod_name)}"
     parts = [
@@ -754,13 +792,16 @@ def main() -> None:
 
         # Link each class/function in the preview directly to its anchor so the
         # index page is a fast jumping-off point.
+        anchors = {
+            m["name"]: symbol_index[f"{mod_name}.{m['name']}"][0].anchor
+            for m in members
+            if m.get("kind") in ("class", "function")
+        }
         class_links = [
-            f"[`{m['name']}`](#{_class_anchor(mod_name, m['name'])})" for m in members if m.get("kind") == "class"
+            f"[`{m['name']}`](#{anchors[m['name']]})" for m in members if m.get("kind") == "class"
         ]
         function_links = [
-            f"[`{m['name']}()`](#{_function_anchor(mod_name, m['name'])})"
-            for m in members
-            if m.get("kind") == "function"
+            f"[`{m['name']}()`](#{anchors[m['name']]})" for m in members if m.get("kind") == "function"
         ]
         rendered_count = len(class_links) + len(function_links)
         preview_items = (class_links + function_links)[:8]
