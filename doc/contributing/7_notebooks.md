@@ -62,6 +62,28 @@ The docs workflow runs strict link checking for the `latest` slot, including PR
 validation, before rendering. Frozen release versions retain their existing build
 behavior.
 
+CI uses the public MyST `Session` and `build` APIs with a pinned Node dependency
+tree in `build_scripts/docs_link_check`. This keeps strict internal and local
+link validation while retrying individual external GET requests, not builds.
+The checker pins MyST CLI 1.11.0 from Jupyter Book 2.1.7's upstream lockfile;
+updating the locked Jupyter Book version requires refreshing this dependency
+tree and checking strict-build parity.
+Transient network failures, HTTP 408, HTTP 429, and HTTP 5xx receive at most four
+attempts with 20-second request timeouts and 2/4/8-second exponential backoff.
+`Retry-After` seconds and dates extend that wait up to 60 seconds. A longer
+server-requested wait fails the check instead of retrying early. Exhausted
+retries, invalid certificates, and deterministic errors such as 403, 404, and
+410 still fail normally. The existing narrowly scoped exceptions in
+`doc/myst.yml` remain unchanged.
+
+To run the same resilient check locally after preparing the API reference,
+use Node 22 or newer and run from the repository root:
+
+```powershell
+npm ci --prefix build_scripts/docs_link_check --ignore-scripts --no-audit --no-fund
+node build_scripts/docs_link_check/check.mjs
+```
+
 ### PDF prerequisites and validation
 
 The `plain_latex_book` export requires `latexmk`, `xelatex`, and the template's

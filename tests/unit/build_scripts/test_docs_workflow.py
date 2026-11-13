@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -213,8 +214,15 @@ def test_workflow_checks_current_docs_links_before_rendering() -> None:
     steps = _workflow()["jobs"]["build"]["steps"]
     check = _step(job="build", name="Check documentation links")
     assert check["if"] == "steps.cache.outputs.cache-hit != 'true' && matrix.slug == 'latest'"
-    assert check["working-directory"] == "doc"
-    assert check["run"] == "uv run --frozen --no-sync jupyter-book build --site --strict --check-links"
+    assert check["run"].splitlines() == [
+        "npm ci --prefix build_scripts/docs_link_check --ignore-scripts --no-audit --no-fund",
+        "node build_scripts/docs_link_check/check.mjs",
+    ]
+    node = _step(job="build", name="Set up Node for resilient link checks")
+    assert node["if"] == check["if"]
+    assert node["with"]["node-version"] == "22"
+    runner = (REPO_ROOT / "build_scripts" / "docs_link_check" / "check.mjs").read_text(encoding="utf-8")
+    assert "site: true, strict: true, checkLinks: true" in runner
     assert steps.index(_step(job="build", name="Generate API reference (pydoc2json + gen_api_md)")) < steps.index(check)
     assert steps.index(check) < steps.index(_step(job="build", name="Build the static HTML site"))
 
@@ -240,6 +248,17 @@ def test_docs_and_dependency_inputs_trigger_pr_validation_and_main_publication()
         "MANIFEST.in",
     }
     assert "paths-ignore" not in events["push"]
+
+
+def test_link_checker_tracks_locked_jupyter_book_version() -> None:
+    lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    book = next(package for package in lock["package"] if package["name"] == "jupyter-book")
+    manifest = json.loads(
+        (REPO_ROOT / "build_scripts" / "docs_link_check" / "package.json").read_text(encoding="utf-8")
+    )
+    assert manifest["pyritJupyterBookVersion"] == book["version"], (
+        "Refresh the checker from Jupyter Book's upstream lockfile and verify strict-build parity when updating the book."
+    )
 
 
 @pytest.mark.parametrize("event_name", ["pull_request", "push", "workflow_dispatch"])
