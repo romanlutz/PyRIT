@@ -84,6 +84,8 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    # Older AnyIO pytest plugins import CallSpec2, deprecated in pytest 9.2.
+    "anyio>=4.15.0",
     "feedgen>=1.0.0",
     "griffe>=2.0.0",
     "ipykernel>=6.29.5",
