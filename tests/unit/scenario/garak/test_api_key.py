@@ -14,7 +14,7 @@ from pyrit.converter import Base64Converter, Converter
 from pyrit.executor.attack import PromptSendingAttack
 from pyrit.models import ComponentIdentifier, ScenarioDatasetRequest, ScenarioRunSizeEstimateStatus, Seed, SeedDataset
 from pyrit.prompt_target import PromptTarget
-from pyrit.scenario import BaselineAttackPolicy, DatasetAttackConfiguration
+from pyrit.scenario import BaselineAttackPolicy, DatasetAttackConfiguration, DatasetSource
 from pyrit.scenario.core import DatasetConstraintError
 from pyrit.scenario.garak import (  # type: ignore[ty:unresolved-import]
     ApiKey,
@@ -89,7 +89,7 @@ class TestApiKey:
         assert scenario.VERSION == 1
         assert scenario.BASELINE_ATTACK_POLICY is BaselineAttackPolicy.Forbidden
         assert scenario._default_dataset_config.dataset_names == ApiKey.required_datasets()
-        assert scenario._default_dataset_config.max_dataset_size == 20
+        assert scenario._default_dataset_config.max_total == 20
         assert {"dataset_config", "technique_converters"} <= parameters
         assert "prompt_cap" not in parameters
         expected = {ApiKeyTechnique.GetKey, ApiKeyTechnique.CompleteKey}
@@ -116,7 +116,7 @@ class TestApiKey:
             scenario=scenario,
             target=mock_objective_target,
             corpus_seeds=corpus_seeds,
-            dataset_config=ApiKeyDatasetConfiguration(dataset_names=ApiKey.required_datasets(), max_dataset_size="all"),
+            dataset_config=ApiKeyDatasetConfiguration(sources=[DatasetSource(name=name) for name in ApiKey.required_datasets()], max_total="all"),
         )
 
         assert {name: len(groups) for name, groups in _objectives(scenario).items()} == {
@@ -141,7 +141,7 @@ class TestApiKey:
                 scenario=scenario,
                 target=mock_objective_target,
                 corpus_seeds=corpus_seeds,
-                dataset_config=ApiKeyDatasetConfiguration(dataset_names=ApiKey.required_datasets(), max_dataset_size=3),
+                dataset_config=ApiKeyDatasetConfiguration(sources=[DatasetSource(name=name) for name in ApiKey.required_datasets()], max_total=3),
             )
 
         assert list(_objectives(scenario)) == ["complete_key"]
@@ -154,7 +154,7 @@ class TestApiKey:
         self, size: int, mock_objective_target: PromptTarget, corpus_seeds: dict[str, list[Seed[Any]]]
     ) -> None:
         original = ApiKey()
-        config = ApiKeyDatasetConfiguration(dataset_names=ApiKey.required_datasets(), max_dataset_size=size)
+        config = ApiKeyDatasetConfiguration(sources=[DatasetSource(name=name) for name in ApiKey.required_datasets()], max_total=size)
         await _initialize_async(
             scenario=original, target=mock_objective_target, corpus_seeds=corpus_seeds, dataset_config=config
         )
@@ -166,7 +166,7 @@ class TestApiKey:
                 target=mock_objective_target,
                 corpus_seeds={name: list(reversed(seeds)) for name, seeds in corpus_seeds.items()},
                 dataset_config=ApiKeyDatasetConfiguration(
-                    dataset_names=ApiKey.required_datasets(), max_dataset_size=size
+                    sources=[DatasetSource(name=name) for name in ApiKey.required_datasets()], max_total=size
                 ),
             )
 
@@ -199,7 +199,7 @@ class TestApiKey:
             scenario=scenario,
             target=mock_objective_target,
             corpus_seeds=corpus_seeds,
-            dataset_config=ApiKeyDatasetConfiguration(dataset_names=ApiKey.required_datasets()),
+            dataset_config=ApiKeyDatasetConfiguration(sources=[DatasetSource(name=name) for name in ApiKey.required_datasets()]),
             technique_converters={"get_key": [converter]},
         )
 
@@ -219,7 +219,7 @@ class TestApiKey:
                 target=mock_objective_target,
                 corpus_seeds=corpus_seeds,
                 dataset_config=ApiKeyDatasetConfiguration(
-                    dataset_names=ApiKey.required_datasets(), validators=[validator]
+                    sources=[DatasetSource(name=name) for name in ApiKey.required_datasets()], validators=[validator]
                 ),
             )
         validator.assert_called_once()
@@ -227,8 +227,8 @@ class TestApiKey:
     @pytest.mark.parametrize(
         "config",
         [
-            DatasetAttackConfiguration(dataset_names=ApiKey.required_datasets()),
-            ApiKeyDatasetConfiguration(dataset_names=[DATASET_PARTIAL_KEYS]),
+            DatasetAttackConfiguration(sources=[DatasetSource(name=name) for name in ApiKey.required_datasets()]),
+            ApiKeyDatasetConfiguration(sources=[DatasetSource(name=DATASET_PARTIAL_KEYS)]),
             ApiKeyDatasetConfiguration(seeds=[]),
         ],
     )
@@ -312,7 +312,7 @@ class TestApiKey:
                 "objective_target": mock_objective_target,
                 "scenario_techniques": [technique],
                 "dataset_config": ApiKeyDatasetConfiguration(
-                    dataset_names=ApiKey.required_datasets(), max_dataset_size=size
+                    sources=[DatasetSource(name=name) for name in ApiKey.required_datasets()], max_total=size
                 ),
             }
         )

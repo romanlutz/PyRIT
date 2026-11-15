@@ -27,12 +27,11 @@ from pyrit.models import (
 )
 from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration
 from pyrit.registry import AttackTechniqueRegistry, ScenarioRegistry, TargetRegistry
-from pyrit.scenario import AttackTechnique
+from pyrit.scenario import AttackTechnique, DatasetSource
 from pyrit.scenario.core import (
     AtomicAttack,
     CompoundDatasetAttackConfiguration,
     DatasetAttackConfiguration,
-    DatasetSource,
     Scenario,
     ScenarioTechnique,
 )
@@ -103,7 +102,7 @@ class _MatrixEstimateScenario(Scenario):
         super().__init__(
             version=1,
             technique_class=_TwoTechniqueDefault,
-            default_dataset_config=DatasetAttackConfiguration(dataset_names=["missing"]),
+            default_dataset_config=DatasetAttackConfiguration(sources=[DatasetSource(name="missing")]),
             objective_scorer=_scorer(),
         )
 
@@ -163,7 +162,7 @@ async def test_default_estimate_uses_five_without_population_or_persistence_asyn
             {},
             {
                 "dataset_config": PromptInjectDatasetConfiguration(
-                    dataset_names=PromptInject.required_datasets(), max_dataset_size=1
+                    sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()], max_total=1
                 )
             },
             "must be at least the number of goal_texts",
@@ -174,7 +173,7 @@ async def test_default_estimate_uses_five_without_population_or_persistence_asyn
         (
             LatentInjection,
             {},
-            {"dataset_config": LatentInjectionDatasetConfiguration(dataset_names=["wrong"])},
+            {"dataset_config": LatentInjectionDatasetConfiguration(sources=[DatasetSource(name="wrong")])},
             "requires exactly",
         ),
         (LatentInjection, {}, {"families": []}, "non-empty selection"),
@@ -183,7 +182,7 @@ async def test_default_estimate_uses_five_without_population_or_persistence_asyn
         (
             FigStep,
             {"objective_scorer": _scorer()},
-            {"dataset_config": DatasetAttackConfiguration(dataset_names=["wrong"])},
+            {"dataset_config": DatasetAttackConfiguration(sources=[DatasetSource(name="wrong")])},
             "exactly one",
         ),
         (Exploitation, {}, {"prompt_cap": 0}, "prompt_cap must be greater than zero"),
@@ -256,7 +255,7 @@ async def test_prompt_inject_valid_coverage_caps_still_have_configuration_only_p
     scenario.set_params_from_args(
         args={
             "dataset_config": PromptInjectDatasetConfiguration(
-                dataset_names=PromptInject.required_datasets(), max_dataset_size=cap
+                sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()], max_total=cap
             )
         }
     )
@@ -271,10 +270,10 @@ async def test_prompt_inject_valid_coverage_caps_still_have_configuration_only_p
 async def test_compound_configuration_checks_children_before_a_bounded_preview_async() -> None:
     config = CompoundDatasetAttackConfiguration(
         configurations=[
-            DatasetAttackConfiguration(dataset_names=["missing"]),
-            PromptInjectDatasetConfiguration(dataset_names=PromptInject.required_datasets(), max_dataset_size=1),
+            DatasetAttackConfiguration(sources=[DatasetSource(name="missing")]),
+            PromptInjectDatasetConfiguration(sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()], max_total=1),
         ],
-        max_dataset_size=10,
+        max_total=10,
     )
     scenario = _MatrixEstimateScenario()
     scenario.set_params_from_args(args={"dataset_config": config})
@@ -315,7 +314,7 @@ async def test_configured_estimate_uses_selected_techniques_and_limit_async(*, b
             "scenario_techniques": [_TwoTechniqueDefault.ONE],
             "include_baseline": baseline,
             "dataset_config": DatasetAttackConfiguration(
-                dataset_names=["also-missing"], max_per_dataset="all", max_total=7
+                sources=[DatasetSource(name="also-missing")], max_per_dataset="all", max_total=7
             ),
         }
     )
@@ -333,7 +332,7 @@ async def test_estimate_expands_aggregate_and_applies_combined_cap_once_async() 
             "scenario_techniques": [_TwoTechniqueDefault.ALL],
             "include_baseline": False,
             "dataset_config": DatasetAttackConfiguration(
-                dataset_names=["one", "two"], max_per_dataset="all", max_total=3
+                sources=[DatasetSource(name="one"), DatasetSource(name="two")], max_per_dataset="all", max_total=3
             ),
         }
     )
@@ -349,7 +348,11 @@ async def test_estimate_combines_independent_child_limits_async() -> None:
     scenario.set_params_from_args(
         args={
             "include_baseline": False,
-            "dataset_config": CompoundDatasetAttackConfiguration.per_dataset(dataset_names=["one", "two"]),
+            "dataset_config": CompoundDatasetAttackConfiguration(
+                configurations=[
+                    DatasetAttackConfiguration(sources=[DatasetSource(name=name)]) for name in ("one", "two")
+                ]
+            ),
         }
     )
     estimate = await scenario.get_run_size_estimate_async()
@@ -363,7 +366,7 @@ async def test_unlimited_estimate_does_not_load_data_or_invent_a_count_async() -
     scenario.set_params_from_args(
         args={
             "dataset_config": DatasetAttackConfiguration(
-                dataset_names=["missing"], max_per_dataset="all", max_total="all"
+                sources=[DatasetSource(name="missing")], max_per_dataset="all", max_total="all"
             )
         }
     )
@@ -586,7 +589,7 @@ async def test_package_hallucination_uses_per_language_generation_cap_async(
         args={
             "scenario_techniques": [technique],
             "dataset_config": DatasetAttackConfiguration(
-                dataset_names=["missing"], max_per_dataset="all", max_total=dataset_limit
+                sources=[DatasetSource(name="missing")], max_per_dataset="all", max_total=dataset_limit
             ),
         }
     )

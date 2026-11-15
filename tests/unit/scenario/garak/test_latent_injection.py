@@ -3,6 +3,7 @@
 
 """Behavior and resume tests for latent document injection."""
 
+from pyrit.scenario import DatasetSource
 import random
 from typing import Any
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from pyrit.memory import CentralMemory, MemoryInterface
 from pyrit.models import AttackSeedGroup, Seed, SeedObjective, SeedPrompt
 from pyrit.scenario import (
     DatasetAttackConfiguration,
+    DatasetFetchPolicy,
     ResolvedDataset,
 )
 from pyrit.scenario.core import (
@@ -30,7 +32,7 @@ from pyrit.score import SubStringScorer
 
 
 def _config(**kwargs: Any) -> LatentInjectionDatasetConfiguration:
-    return LatentInjectionDatasetConfiguration(dataset_names=LatentInjection.required_datasets(), **kwargs)
+    return LatentInjectionDatasetConfiguration(sources=[DatasetSource(name=name) for name in LatentInjection.required_datasets()], **kwargs)
 
 
 @pytest.fixture
@@ -105,12 +107,11 @@ class TestLatentDefaults:
         ("kwargs", "expected_cap"),
         [
             ({}, 92),
-            ({"max_dataset_size": None}, 92),
+            ({"max_total": None}, 92),
             ({"max_total": "default"}, 92),
             ({"max_total": ""}, 92),
-            ({"max_dataset_size": "all"}, "all"),
             ({"max_total": "all"}, "all"),
-            ({"max_dataset_size": 23}, 23),
+            ({"max_total": 23}, 23),
         ],
     )
     async def test_configuration_defaults_resolve_with_family_coverage_async(
@@ -119,7 +120,7 @@ class TestLatentDefaults:
         config = _config(**kwargs)
         await config.prepare_async()
         groups = await config.get_attack_seed_groups_async()
-        assert config.max_dataset_size == expected_cap
+        assert config.max_total == expected_cap
         assert len(config.coverage_keys) == 23
         assert {config._coverage_key(group) for group in groups} == set(config.coverage_keys)
         full = await config.get_attack_seed_groups_async(apply_sampling=False)
@@ -170,7 +171,7 @@ class TestLatentDefaults:
             assert config.START_MARKER not in text and config.END_MARKER not in text
 
     async def test_auto_fetch_false_and_wrong_configs_async(self) -> None:
-        config = _config(auto_fetch=False)
+        config = _config(fetch=DatasetFetchPolicy.NEVER)
         with patch(
             "pyrit.datasets.seed_datasets.seed_dataset_provider.SeedDatasetProvider.get_providers_by_name_async"
         ) as fetch:
@@ -183,7 +184,7 @@ class TestLatentDefaults:
         with pytest.raises(DatasetConstraintError, match="inline seeds"):
             await inline.get_attack_seed_groups_async()
         with pytest.raises(DatasetConstraintError, match="requires exactly"):
-            await LatentInjectionDatasetConfiguration(dataset_names=["wrong"]).get_attack_seed_groups_async()
+            await LatentInjectionDatasetConfiguration(sources=[DatasetSource(name="wrong")]).get_attack_seed_groups_async()
 
     @pytest.mark.parametrize("families", [[], ["unknown"]])
     def test_invalid_families(self, families: list[str]) -> None:
@@ -193,7 +194,7 @@ class TestLatentDefaults:
     @pytest.mark.parametrize("cap", [0, -1])
     def test_invalid_constructor_budget(self, cap: int) -> None:
         with pytest.raises(ValueError, match="max_total"):
-            _config(max_dataset_size=cap)
+            _config(max_total=cap)
 
     @pytest.mark.parametrize(("family", "cap"), [("fact_eiffel", 20), ("fact_legal", 20), ("whois_snippet", 10)])
     def test_snippet_contexts_are_bounded(self, family: str, cap: int) -> None:
@@ -210,7 +211,7 @@ class TestLatentDefaults:
 @pytest.mark.usefixtures("seeded_memory_async")
 class TestLatentPopulation:
     async def test_budget_coverage_and_full_resolution_async(self) -> None:
-        config = _config(families=["whois", "resume"], max_dataset_size=4)
+        config = _config(families=["whois", "resume"], max_total=4)
         with patch("pyrit.scenario.core.dataset_sampling.random", random.Random(3)):
             flat = await config.get_attack_seed_groups_async()
         with patch("pyrit.scenario.core.dataset_sampling.random", random.Random(3)):
@@ -222,7 +223,7 @@ class TestLatentPopulation:
         assert {config._coverage_key(group) for group in flat} == set(config.coverage_keys)
         full = await config.get_attack_seed_groups_async(apply_sampling=False)
         assert len(full) == 12
-        config.max_dataset_size = "all"
+        config.max_total = "all"
         assert len(await config.get_attack_seed_groups_async()) == 12
         for group in full:
             assert group.prompts[0].source == "https://example.test/context"
@@ -243,8 +244,8 @@ class TestLatentPopulation:
         seen: list[ResolvedDataset] = []
         config = _config(
             families=["whois"],
-            max_dataset_size=2,
-            auto_fetch=False,
+            max_total=2,
+            fetch=DatasetFetchPolicy.NEVER,
             filters={"data_types": ["text"]},
             validators=[seen.append],
         )
@@ -342,7 +343,7 @@ class TestLatentAttacks:
         scenario = LatentInjection(objective_scorer=scorer)
         await _initialize_async(
             scenario,
-            dataset_config=_config(families=["whois"], max_dataset_size=2),
+            dataset_config=_config(families=["whois"], max_total=2),
             scenario_techniques=[LatentInjectionTechnique.Bare, LatentInjectionTechnique.SystemTag],
             technique_converters={"system_tag": [extra]},
         )
@@ -373,7 +374,7 @@ class TestLatentAttacks:
         }
         for seed in sources[f"garak_latent_injection_{role}"]:
             seed.value = literal + ("<|trigger|>" if role == "payload_templates" else "")
-        config = _config(families=["whois"], max_dataset_size=2)
+        config = _config(families=["whois"], max_total=2)
         with patch.object(config, "_collect_named_seeds_async", return_value=sources):
             scenario = LatentInjection()
             await _initialize_async(
@@ -407,7 +408,7 @@ class TestLatentAttacks:
         original = LatentInjection()
         await _initialize_async(
             original,
-            dataset_config=_config(families=["whois"], max_dataset_size=2),
+            dataset_config=_config(families=["whois"], max_total=2),
             scenario_techniques=[LatentInjectionTechnique.Bare],
         )
         identities = _ids(original)
@@ -422,7 +423,7 @@ class TestLatentAttacks:
         with patch.object(seeded_memory_async, "get_seeds_async", side_effect=reversed_seeds_async):
             await _initialize_async(
                 resumed,
-                dataset_config=_config(families=["whois"], max_dataset_size=2),
+                dataset_config=_config(families=["whois"], max_total=2),
                 scenario_techniques=[LatentInjectionTechnique.Bare],
             )
         assert _ids(resumed) == identities
@@ -432,7 +433,7 @@ class TestLatentAttacks:
     async def test_changed_scorer_refuses_resume_async(self) -> None:
         original = LatentInjection()
         args = {
-            "dataset_config": _config(families=["whois"], max_dataset_size=2),
+            "dataset_config": _config(families=["whois"], max_total=2),
             "scenario_techniques": [LatentInjectionTechnique.Bare],
         }
         await _initialize_async(original, **args)
@@ -446,7 +447,7 @@ class TestLatentAttacks:
         scorer = SubStringScorer(substring="fixed")
         original = LatentInjection(objective_scorer=scorer, harm_scorer=SubStringScorer(substring="harm"))
         args = {
-            "dataset_config": _config(families=["whois", "latent_jailbreak"], max_dataset_size=4),
+            "dataset_config": _config(families=["whois", "latent_jailbreak"], max_total=4),
             "scenario_techniques": [LatentInjectionTechnique.Bare],
         }
         await _initialize_async(original, **args)
@@ -461,7 +462,7 @@ class TestLatentAttacks:
     async def test_changed_case_refuses_resume_async(self, seeded_memory_async: MemoryInterface) -> None:
         original = LatentInjection()
         args = {
-            "dataset_config": _config(families=["whois"], max_dataset_size=2),
+            "dataset_config": _config(families=["whois"], max_total=2),
             "scenario_techniques": [LatentInjectionTechnique.Bare],
         }
         await _initialize_async(original, **args)

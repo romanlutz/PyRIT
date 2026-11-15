@@ -277,7 +277,7 @@ class TestAttackSeedGroupInit:
                 SeedObjective(value="Test objective"),
                 SeedSimulatedConversation(
                     num_turns=3,
-                    adversarial_chat_system_prompt_path=adv_path,
+                    adversarial_chat_system_prompt=SeedPrompt.from_yaml_file(adv_path),
                 ),
             ]
         )
@@ -297,7 +297,7 @@ class TestAttackSeedGroupInit:
                 {
                     "seed_type": "simulated_conversation",
                     "num_turns": 5,
-                    "adversarial_chat_system_prompt_path": str(adv_path),
+                    "adversarial_chat_system_prompt": SeedPrompt.from_yaml_file(adv_path),
                 },
             ]
         )
@@ -318,7 +318,7 @@ class TestAttackSeedGroupInit:
                     SeedObjective(value="Objective"),
                     SeedSimulatedConversation(
                         num_turns=3,
-                        adversarial_chat_system_prompt_path=adv_path,
+                        adversarial_chat_system_prompt=SeedPrompt.from_yaml_file(adv_path),
                         sequence=0,
                     ),
                     SeedPrompt(value="Prompt 1", data_type="text", sequence=2, role="user"),
@@ -335,7 +335,7 @@ class TestAttackSeedGroupInit:
                 {
                     "seed_type": "simulated_conversation",
                     "num_turns": 2,
-                    "adversarial_chat_system_prompt_path": str(adv_path),
+                    "adversarial_chat_system_prompt": SeedPrompt.from_yaml_file(adv_path),
                 },
                 {"value": "Objective", "seed_type": "objective"},
             ]
@@ -402,7 +402,7 @@ class TestAttackSeedGroupSimulatedConversation:
                 SeedObjective(value="Objective"),
                 SeedSimulatedConversation(
                     num_turns=3,
-                    adversarial_chat_system_prompt_path=adv_path,
+                    adversarial_chat_system_prompt=SeedPrompt.from_yaml_file(adv_path),
                 ),
             ]
         )
@@ -421,7 +421,7 @@ class TestAttackSeedGroupSimulatedConversation:
                 SeedObjective(value="Objective"),
                 SeedSimulatedConversation(
                     num_turns=2,
-                    adversarial_chat_system_prompt_path=adv_path,
+                    adversarial_chat_system_prompt=SeedPrompt.from_yaml_file(adv_path),
                     sequence=0,
                 ),
                 SeedPrompt(value="Static follow-up", data_type="text", sequence=10, role="user"),
@@ -445,7 +445,7 @@ class TestAttackSeedGroupSimulatedConversation:
                 SeedPrompt(value="Static intro", data_type="text", sequence=0, role="user"),
                 SeedSimulatedConversation(
                     num_turns=2,
-                    adversarial_chat_system_prompt_path=adv_path,
+                    adversarial_chat_system_prompt=SeedPrompt.from_yaml_file(adv_path),
                     sequence=5,
                 ),
             ]
@@ -586,7 +586,7 @@ class TestAttackSeedGroupRepr:
                 SeedObjective(value="Objective"),
                 SeedSimulatedConversation(
                     num_turns=3,
-                    adversarial_chat_system_prompt_path=adv_path,
+                    adversarial_chat_system_prompt=SeedPrompt.from_yaml_file(adv_path),
                 ),
             ]
         )

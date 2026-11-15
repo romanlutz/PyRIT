@@ -3,6 +3,7 @@
 
 """Tests for the Garak PromptInject scenario."""
 
+from pyrit.scenario import DatasetSource, DatasetFetchPolicy
 import random
 from unittest.mock import MagicMock, patch
 
@@ -92,7 +93,7 @@ class TestPromptInjectInitialization:
 
         assert isinstance(config, PromptInjectDatasetConfiguration)
         assert config.dataset_names == ["prompt_inject_contexts", "prompt_inject_techniques"]
-        assert config.max_dataset_size == 12
+        assert config.max_total == 12
 
     def test_default_technique_expands_to_all_five_forms(self) -> None:
         resolved = PromptInjectTechnique.resolve(None, default=PromptInjectTechnique.default())
@@ -157,7 +158,7 @@ class TestPromptInjectAtomicAttacks:
     ) -> None:
         scenario = PromptInject()
         goals = ["goal A", "goal B", "goal C"]
-        config = PromptInjectDatasetConfiguration(dataset_names=PromptInject.required_datasets(), max_dataset_size=cap)
+        config = PromptInjectDatasetConfiguration(sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()], max_total=cap)
 
         with patch("pyrit.scenario.core.dataset_sampling.random", random.Random(seed)):
             await _initialize_async(scenario, target=mock_objective_target, goal_texts=goals, dataset_config=config)
@@ -181,8 +182,8 @@ class TestPromptInjectAtomicAttacks:
             scenario,
             target=mock_objective_target,
             dataset_config=PromptInjectDatasetConfiguration(
-                dataset_names=PromptInject.required_datasets(),
-                max_dataset_size="all",
+                sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()],
+                max_total="all",
             ),
         )
 
@@ -199,8 +200,8 @@ class TestPromptInjectAtomicAttacks:
             techniques=[PromptInjectTechnique.IgnorePrint, PromptInjectTechnique.IgnoreSay],
             goal_texts=["goal one", "goal two"],
             dataset_config=PromptInjectDatasetConfiguration(
-                dataset_names=PromptInject.required_datasets(),
-                max_dataset_size=10,
+                sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()],
+                max_total=10,
             ),
         )
 
@@ -242,7 +243,7 @@ class TestPromptInjectAtomicAttacks:
             target=mock_objective_target,
             goal_texts=[goal],
             dataset_config=PromptInjectDatasetConfiguration(
-                dataset_names=PromptInject.required_datasets(), max_dataset_size="all"
+                sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()], max_total="all"
             ),
         )
 
@@ -290,7 +291,7 @@ class TestPromptInjectAtomicAttacks:
             techniques=[PromptInjectTechnique.IgnorePrint, PromptInjectTechnique.IgnoreSay],
             goal_texts=["custom goal"],
             dataset_config=PromptInjectDatasetConfiguration(
-                dataset_names=PromptInject.required_datasets(), max_dataset_size=1
+                sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()], max_total=1
             ),
         )
         attacks = {attack.atomic_attack_name: attack for attack in scenario._atomic_attacks}
@@ -376,8 +377,8 @@ class TestPromptInjectAtomicAttacks:
     async def test_dataset_cap_smaller_than_goal_count_raises(self, mock_objective_target: PromptTarget) -> None:
         scenario = PromptInject()
         config = PromptInjectDatasetConfiguration(
-            dataset_names=PromptInject.required_datasets(),
-            max_dataset_size=1,
+            sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()],
+            max_total=1,
         )
 
         with pytest.raises(
@@ -398,7 +399,7 @@ class TestPromptInjectAtomicAttacks:
             raise DatasetConstraintError("custom validator ran")
 
         config = PromptInjectDatasetConfiguration(
-            dataset_names=PromptInject.required_datasets(),
+            sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()],
             validators=[reject_dataset],
         )
 
@@ -407,7 +408,7 @@ class TestPromptInjectAtomicAttacks:
 
     async def test_auto_fetch_false_is_preserved_async(self, mock_objective_target: PromptTarget) -> None:
         scenario = PromptInject()
-        config = PromptInjectDatasetConfiguration(dataset_names=PromptInject.required_datasets(), auto_fetch=False)
+        config = PromptInjectDatasetConfiguration(sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()], fetch=DatasetFetchPolicy.NEVER)
 
         with patch(
             "pyrit.datasets.seed_datasets.seed_dataset_provider.SeedDatasetProvider.get_providers_by_name_async"
@@ -420,7 +421,7 @@ class TestPromptInjectAtomicAttacks:
 
     async def test_unsupported_dataset_configuration_type_raises(self, mock_objective_target: PromptTarget) -> None:
         scenario = PromptInject()
-        config = DatasetAttackConfiguration(dataset_names=["prompt_inject_contexts"])
+        config = DatasetAttackConfiguration(sources=[DatasetSource(name="prompt_inject_contexts")])
 
         with pytest.raises(
             DatasetConstraintError,
@@ -432,15 +433,15 @@ class TestPromptInjectAtomicAttacks:
         class CustomConfiguration(PromptInjectDatasetConfiguration):
             pass
 
-        config = CustomConfiguration(dataset_names=PromptInject.required_datasets())
+        config = CustomConfiguration(sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()])
         with pytest.raises(DatasetConstraintError, match="only supports PromptInjectDatasetConfiguration"):
             await _initialize_async(PromptInject(), target=mock_objective_target, dataset_config=config)
 
     async def test_unsupported_dataset_selection_raises(self, mock_objective_target: PromptTarget) -> None:
         scenario = PromptInject()
         config = PromptInjectDatasetConfiguration(
-            dataset_names=["prompt_inject_techniques"],
-            max_dataset_size=1,
+            sources=[DatasetSource(name="prompt_inject_techniques")],
+            max_total=1,
         )
 
         with pytest.raises(DatasetConstraintError, match="requires exactly"):
@@ -479,7 +480,7 @@ class TestPromptInjectDatasetSampling:
     ) -> None:
         goals = [f"goal {index}" for index in range(6)]
         config = PromptInjectDatasetConfiguration(
-            dataset_names=PromptInject.required_datasets(), goal_texts=goals, **kwargs
+            sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()], goal_texts=goals, **kwargs
         )
         await config.prepare_async()
         groups = await config.get_attack_seed_groups_async()
@@ -490,7 +491,7 @@ class TestPromptInjectDatasetSampling:
     async def test_both_resolvers_preserve_goal_coverage_async(self, grouped: bool) -> None:
         goals = ["goal A", "goal B", "goal C"]
         config = PromptInjectDatasetConfiguration(
-            dataset_names=PromptInject.required_datasets(), goal_texts=goals, max_dataset_size=3
+            sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()], goal_texts=goals, max_total=3
         )
         await config.prepare_async()
         with patch("pyrit.scenario.core.dataset_sampling.random", random.Random(0)):
@@ -507,7 +508,7 @@ class TestPromptInjectDatasetSampling:
 
     async def test_flat_resolver_rejects_impossible_cap_async(self) -> None:
         config = PromptInjectDatasetConfiguration(
-            dataset_names=PromptInject.required_datasets(), goal_texts=["goal one", "goal two"], max_dataset_size=1
+            sources=[DatasetSource(name=name) for name in PromptInject.required_datasets()], goal_texts=["goal one", "goal two"], max_total=1
         )
 
         with pytest.raises(DatasetConstraintError, match="must be at least the number of goal_texts"):
