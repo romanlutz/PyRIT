@@ -316,6 +316,7 @@ describe("ConversationPanel", () => {
     await waitFor(() => {
       expect(mockedAttacksApi.getConversations).toHaveBeenCalledTimes(1);
     });
+    await screen.findByText("No related conversations");
   });
 
   it("should show empty state when no conversations", async () => {

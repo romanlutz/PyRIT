@@ -152,8 +152,11 @@ describe('ScenarioHistory', () => {
     expect(mockedScenariosApi.listRuns).toHaveBeenCalledTimes(requests)
   })
 
-  it('does not send an invalid URL ID as an unfiltered request', () => {
+  it('does not send an invalid URL ID as an unfiltered request', async () => {
+    const user = userEvent.setup()
     renderHistory({ ...defaultProps, filters: { ...DEFAULT_SCENARIO_HISTORY_FILTERS, referenceId: 'invalid' } })
+    await user.click(screen.getByRole('combobox', { name: 'Registered scenario' }))
+    await screen.findByRole('option', { name: 'foundry.red_team' })
     expect(screen.getByText('Enter a complete ID (UUID).')).toBeVisible()
     expect(mockedScenariosApi.listRuns).not.toHaveBeenCalled()
   })
@@ -760,8 +763,12 @@ describe('ScenarioHistory', () => {
     expect(screen.queryByRole('button', { name: 'Browse scenarios' })).not.toBeInTheDocument()
   })
 
-  it('enables the single reset icon only when filters are active', () => {
+  it('enables the single reset icon only when filters are active', async () => {
+    mockedScenariosApi.listRuns.mockResolvedValue({
+      items: [RUN], pagination: { limit: 25, has_more: false },
+    })
     const history = renderHistory()
+    await screen.findByRole('table', { name: 'Scanner history' })
     expect(screen.getByRole('button', { name: 'Reset all filters' })).toHaveAttribute('aria-disabled', 'true')
 
     history.rerender(
@@ -773,6 +780,7 @@ describe('ScenarioHistory', () => {
       </FluentProvider>,
     )
 
+    await screen.findByRole('table', { name: 'Scanner history' })
     expect(screen.getByRole('button', { name: 'Reset all filters' })).not.toHaveAttribute('aria-disabled')
   })
 
@@ -789,6 +797,7 @@ describe('ScenarioHistory', () => {
     await waitFor(() => expect(mockedScenariosApi.listRuns).toHaveBeenCalledWith(
       expect.objectContaining({ run_statuses: ['QUEUED'] }),
     ))
+    await screen.findByTestId('scenario-history-empty')
   })
 
   it('serializes filters, paginates by cursor, and refreshes from the first page', async () => {
