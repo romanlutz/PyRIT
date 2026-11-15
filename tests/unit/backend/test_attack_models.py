@@ -3,8 +3,9 @@
 
 """Request contracts for attacks and exact converter preview results."""
 
+import json
 from typing import get_args
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -19,6 +20,73 @@ from pyrit.backend.models.attacks import (
 )
 from pyrit.models import PromptDataType
 from pyrit.models.catalog import RunScenarioRequest
+
+
+@pytest.mark.filterwarnings("error:Pydantic serializer warnings:UserWarning")
+@pytest.mark.parametrize("input_kind", ["uuid", "string", "json"])
+def test_save_conversation_uuid_creation_and_export_round_trip(input_kind: str) -> None:
+    attack_id, conversation_id, save_id = uuid4(), uuid4(), uuid4()
+    identifiers = {
+        "save_id": save_id,
+        "attack_result_id": attack_id,
+        "source_attack_result_id": attack_id,
+        "source_conversation_id": conversation_id,
+    }
+    payload = {
+        "destination": "same_attack",
+        **{name: value if input_kind == "uuid" else value.hex.upper() for name, value in identifiers.items()},
+    }
+    request = (
+        SaveConversationRequest.model_validate_json(json.dumps(payload))
+        if input_kind == "json"
+        else SaveConversationRequest.model_validate(payload)
+    )
+
+    python_values = request.model_dump(warnings="error")
+    json_values = request.model_dump(mode="json", warnings="error")
+    for name, identifier in identifiers.items():
+        assert isinstance(python_values[name], UUID)
+        assert python_values[name] == identifier
+        assert json_values[name] == str(identifier)
+    assert SaveConversationRequest.model_validate_json(request.model_dump_json(warnings="error")) == request
+
+
+@pytest.mark.filterwarnings("error:Pydantic serializer warnings:UserWarning")
+def test_save_conversation_mutation_preserves_uuid_values_and_json_ids() -> None:
+    request = SaveConversationRequest(save_id=uuid4(), destination="new_attack")
+    attack_id, conversation_id = uuid4(), uuid4()
+    request.destination = "same_attack"
+    request.attack_result_id = attack_id
+    request.source_attack_result_id = attack_id
+    request.source_conversation_id = conversation_id
+    request.reuse_unsent_conversation = True
+    request.expected_source_piece_ids = [uuid4()]
+
+    exported = request.model_dump(mode="json", warnings="error")
+    assert exported["attack_result_id"] == exported["source_attack_result_id"] == str(attack_id)
+    assert exported["source_conversation_id"] == str(conversation_id)
+    restored = SaveConversationRequest.model_validate(exported)
+    assert restored == request
+    assert isinstance(restored.attack_result_id, UUID)
+    assert isinstance(restored.source_attack_result_id, UUID)
+
+
+@pytest.mark.parametrize(
+    "field", ["save_id", "attack_result_id", "source_attack_result_id", "source_conversation_id"]
+)
+def test_save_conversation_rejects_malformed_uuid(field: str) -> None:
+    attack_id = str(uuid4())
+    payload = {
+        "save_id": str(uuid4()),
+        "destination": "same_attack",
+        "attack_result_id": attack_id,
+        "source_attack_result_id": attack_id,
+        "source_conversation_id": str(uuid4()),
+        field: "not-a-uuid",
+    }
+
+    with pytest.raises(ValidationError, match=field):
+        SaveConversationRequest.model_validate_json(json.dumps(payload))
 
 
 @pytest.mark.parametrize("objective", [None, "", "Evaluate the response"])
