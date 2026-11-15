@@ -235,8 +235,10 @@ This builds the current frontend and starts the real application routes and
 compatibility/readiness middleware over a disposable local SQLite database.
 Its synthetic results include repeated conversation IDs, all result roles,
 converter memberships, and a saved retry scenario. It uses a private home,
-explicit empty environment-file/initializer lists, and no provider calls,
-shared database, or Azure credentials. The normal E2E configuration excludes
+explicit empty environment-file lists, core techniques, and a test-only
+`objective_scorer_chat` target for scenario metadata. That target rejects scoring
+requests; executable fixture scenarios supply their own local scorers. There are
+no provider calls, shared database, or Azure credentials. The normal E2E configuration excludes
 this fixture-specific spec; its dedicated configuration owns the server.
 CI runs it as an additional isolated shard of the required Frontend E2E check,
 using the same report upload, merge, and failure gate as the other projects.
@@ -506,6 +508,10 @@ E2E_LIVE_MODE=true npx playwright test
 ```
 
 The mock and seeded projects run in the **GitHub Actions** pull-request workflow. The live project is intended for a protected pipeline with an Entra identity or API keys.
+
+The offline browser initializer also registers the metadata-only scorer target used
+by the isolated analytics and Scenario fixtures. It prevents default scorer lookup
+from constructing a provider target while browsing; it cannot send scoring requests.
 
 For ordinary interactions with startup controls, call `waitForAppReady(page)`
 from `e2e/_runtime.ts` after navigation or reload. A visible control can still

@@ -5,6 +5,7 @@
 
 import asyncio
 
+from frontend.e2e.fixtures.scorer_initializer import OfflineScorerInitializer
 from pyrit.common import apply_defaults
 from pyrit.executor.attack import AttackScoringConfig, PromptSendingAttack
 from pyrit.memory import AttackResultEntry, CentralMemory
@@ -97,6 +98,7 @@ class BrowserInitializer(PyRITInitializer):
 
     async def initialize_async(self) -> None:
         memory = CentralMemory.get_memory_instance()
+        await OfflineScorerInitializer().initialize_async()
         TargetRegistry.get_registry_singleton().instances.register(BrowserTarget(), name="browser_offline")
         ScenarioRegistry.get_registry_singleton().register_class(BrowserScenario, name="browser_offline")
         await asyncio.to_thread(self._store_legacy_attack)

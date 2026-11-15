@@ -218,8 +218,9 @@ def main() -> None:
         directory = Path(temporary).resolve()
         config = directory / "config.yaml"
         config.write_text(
-            "memory_db_type: sqlite\nenv_files: []\nenv_akv_ref: []\ninitializers: []\n"
-            "initialization_scripts: []\nsilent: true\noperator: synthetic\noperation: synthetic\n",
+            "memory_db_type: sqlite\nenv_files: []\nenv_akv_ref: []\ninitializers:\n  - technique\n"
+            "initialization_scripts:\n  - frontend/e2e/fixtures/scorer_initializer.py\n"
+            "silent: true\noperator: synthetic\noperation: synthetic\n",
             encoding="utf-8",
         )
         environment = {
