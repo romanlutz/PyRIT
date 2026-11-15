@@ -16,6 +16,12 @@ PYRIT_AUTH_MODE=local python -m uvicorn pyrit.backend.main:app --reload --host 1
 
 The API will be available at `http://localhost:8000`
 
+Uvicorn's default WebSocket implementation is `websockets-sansio`. PyRIT requires
+Uvicorn 0.53 or newer to retain keepalive, subprotocol negotiation, header values,
+and closing-handshake behavior without importing the deprecated `websockets`
+legacy server. Keep the default `--ws auto`; `--ws websockets` explicitly selects
+the deprecated implementation.
+
 For a shared deployment, set `PYRIT_AUTH_MODE=entra`, configure
 `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, and `ENTRA_ALLOWED_GROUP_IDS`, and then
 bind the server to the intended network interface. Startup fails when neither
